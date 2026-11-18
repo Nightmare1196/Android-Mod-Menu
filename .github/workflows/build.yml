@@ -13,7 +13,10 @@ jobs:
         run: |
           echo "y" | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager "ndk;25.2.9519653"
           echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/25.2.9519653" >> $GITHUB_ENV
-      - name: Build
+      - name: Fix Gradle Wrapper Jar
+        run: |
+          curl -L -o gradle/wrapper/gradle-wrapper.jar https://raw.githubusercontent.com/gradle/gradle/v7.5.0/gradle/wrapper/gradle-wrapper.jar
+      - name: Build Mod Menu
         run: |
           chmod +x gradlew
           ./gradlew :app:assembleRelease
