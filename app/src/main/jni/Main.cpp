@@ -17,7 +17,6 @@
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, LOG_TAG, __VA_ARGS__)
 #define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, LOG_TAG, __VA_ARGS__)
 
-// Dobby hook üçün xarici funksiya
 extern "C" int DobbyHook(void *address, void *replace_call, void **origin_call);
 
 // --- Riyaziyyat Strukturları ---
@@ -40,8 +39,8 @@ struct Matrix4x4 {
 #define OFFSET_AimController_SetTarget   0x42EC7E4
 #define OFFSET_Transform_GetPosition     0x77CF6F4
 
-// --- Menyu Dəyişənləri (Test üçün default aktivdir) ---
-bool aimbot_enabled = true; 
+// --- Menyu Dəyişənləri ---
+bool aimbot_enabled = false; 
 bool team_check = true;
 float aimbot_fov = 15.0f;
 float aimbot_max_dist = 150.0f;
@@ -174,15 +173,35 @@ void AimbotThread() {
     }
 }
 
-// --- XÜSUSİ FUNKSIYA: Kitabxana yüklənəndə avtomatik işə düşür (JNI_OnLoad yerinə) ---
+// =====================================================================
+// JNI FUNKSİYALARI (Setup.cpp xətasını həll etmək üçün)
+// =====================================================================
+
+extern "C" JNIEXPORT jobjectArray JNICALL
+GetFeatureList(JNIEnv* env, jobject thiz) {
+    const char* features[] = {"Aimbot (Head)"};
+    jobjectArray ret = (jobjectArray)env->NewObjectArray(1, env->FindClass("java/lang/String"), env->NewStringUTF(""));
+    env->SetObjectArrayElement(ret, 0, env->NewStringUTF(features[0]));
+    return ret;
+}
+
+extern "C" JNIEXPORT void JNICALL
+Changes(JNIEnv* env, jclass clazz, jobject thiz, jint feature, jstring type, jint value, jlong lvalue, jboolean bvalue, jstring svalue) {
+    if (feature == 0) {
+        aimbot_enabled = bvalue; // Menyudan toggle ediləndə işə düşür
+    }
+}
+
+// =====================================================================
+
+// --- XÜSUSİ FUNKSIYA: Kitabxana yüklənəndə avtomatik işə düşür ---
 __attribute__((constructor))
 void InitAimbot() {
     std::thread([]() {
-        // libil2cpp.so yüklənənə qədər gözləyirik
         while (!il2cpp_base) {
             il2cpp_base = get_module_base("libil2cpp.so");
             if (!il2cpp_base) {
-                usleep(100000); // 100ms gözlə
+                usleep(100000);
             }
         }
         
