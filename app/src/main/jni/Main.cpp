@@ -8,10 +8,18 @@
 #include <mutex>
 #include <algorithm>
 #include <unistd.h>
-#include "Includes/Logger.h"
-#include "Includes/obfuscate.h"
-#include "Menu/Menu.h"
-#include "dobby.h"
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+#include <android/log.h>
+
+// Şablonun öz logger-inə ehtiyacımız olmasın deyə birbaşa log yazırıq
+#define LOG_TAG "PHANTOM_AIMBOT"
+#define LOGI(...) __android_log_print(ANDROID_LOG_INFO, LOG_TAG, __VA_ARGS__)
+#define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, LOG_TAG, __VA_ARGS__)
+
+// Dobby kitabxanası (şablonda default olaraq link olunub)
+extern "C" int DobbyHook(void *address, void *replace_call, void **origin_call);
 
 // --- Riyaziyyat Strukturları ---
 struct Vector3 {
@@ -33,8 +41,8 @@ struct Matrix4x4 {
 #define OFFSET_AimController_SetTarget   0x42EC7E4
 #define OFFSET_Transform_GetPosition     0x77CF6F4 // get_position_Injected
 
-// --- Menyu Dəyişənləri ---
-bool aimbot_enabled = false;
+// --- Menyu Dəyişənləri (Test üçün default aktivdir) ---
+bool aimbot_enabled = true; 
 bool team_check = true;
 float aimbot_fov = 15.0f;
 float aimbot_max_dist = 150.0f;
@@ -70,7 +78,6 @@ bool IsValidPtr(void* obj) {
     return *(void**)((uintptr_t)obj + 0x10) != nullptr; // m_CachedPtr
 }
 
-// Təhlükəsiz şəkildə Transform mövqeyini oxuyur
 Vector3 GetPosition(void* transform) {
     Vector3 pos = {0, 0, 0};
     if (transform && GetTransformPosition) {
@@ -120,7 +127,6 @@ void AimbotThread() {
                         if (camTransform) {
                             Vector3 camPos = GetPosition(camTransform);
                             
-                            // Kameranın baxış istiqaməti (localToWorldMatrix-dən forward vektoru)
                             Matrix4x4 camMat = *(Matrix4x4*)((uintptr_t)camTransform + 0x80);
                             Vector3 camForward = { camMat.m02, camMat.m12, camMat.m22 };
                             
@@ -142,12 +148,10 @@ void AimbotThread() {
                                 
                                 Vector3 headPos = GetPosition(headTrans);
                                 
-                                // Məsafə Yoxlanışı
                                 Vector3 dir = headPos - camPos;
                                 float dist = std::sqrt(dir.x*dir.x + dir.y*dir.y + dir.z*dir.z);
                                 if (dist > aimbot_max_dist) continue;
                                 
-                                // FOV Yoxlanışı
                                 float dot = (dir.x*camForward.x + dir.y*camForward.y + dir.z*camForward.z) / dist;
                                 float cosFov = std::cos(aimbot_fov * 0.5f * 3.14159265f / 180.0f);
                                 if (dot < cosFov) continue;
@@ -173,27 +177,13 @@ void AimbotThread() {
     }
 }
 
-// --- Menyu İnterfeysi ---
-void DrawMenu() {
-    ImGui::Begin(OBFUSCATE("StandChillow 2.07 - Aimbot"), nullptr, ImGuiWindowFlags_NoCollapse);
-    
-    ImGui::Checkbox(OBFUSCATE("Aktiv (Enable)"), &aimbot_enabled);
-    ImGui::Checkbox(OBFUSCATE("Komanda Yoxlamasi (Team Check)"), &team_check);
-    ImGui::SliderFloat(OBFUSCATE("FOV (Dərəcə)"), &aimbot_fov, 1.0f, 180.0f, "%.1f");
-    ImGui::SliderFloat(OBFUSCATE("Maks. Məsafə (Metr)"), &aimbot_max_dist, 10.0f, 500.0f, "%.1f");
-    
-    ImGui::End();
-}
-
 // --- JNI OnLoad ---
 extern "C" JNIEXPORT jint JNI_OnLoad(JavaVM *vm, void *reserved) {
-    il2cpp_base = get_module_base(OBFUSCATE("libil2cpp.so"));
+    il2cpp_base = get_module_base("libil2cpp.so");
     
     if (il2cpp_base) {
-        // Transform.get_position_Injected funksiyasını bağlayırıq
         GetTransformPosition = (GetPositionFn)(il2cpp_base + OFFSET_Transform_GetPosition);
         
-        // PlayerController hook-ları
         void* targetOnEnable = (void*)(il2cpp_base + OFFSET_PlayerController_OnEnable);
         DobbyHook(targetOnEnable, (void*)PlayerController_OnEnable, (void**)&old_PlayerController_OnEnable);
         
@@ -202,9 +192,9 @@ extern "C" JNIEXPORT jint JNI_OnLoad(JavaVM *vm, void *reserved) {
         
         std::thread(AimbotThread).detach();
         
-        LOGI(OBFUSCATE("PHANTOM: Hooklar yerləşdirildi. Baza: %p"), (void*)il2cpp_base);
+        LOGI("PHANTOM: Hooklar yerləşdirildi. Baza: %p", (void*)il2cpp_base);
     } else {
-        LOGE(OBFUSCATE("PHANTOM XƏTA: libil2cpp.so tapılmadı!"));
+        LOGE("PHANTOM XƏTA: libil2cpp.so tapılmadı!");
     }
 
     return JNI_VERSION_1_6;
