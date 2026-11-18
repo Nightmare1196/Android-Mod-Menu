@@ -8,14 +8,9 @@
 #include <mutex>
 #include <algorithm>
 #include <unistd.h>
-#include <cstdio>
-#include <cstdlib>
-#include <cstring>
-#include <android/log.h>
-
 #include "Includes/Logger.h"
 #include "Includes/obfuscate.h"
-#include "imgui.h" // Birbaşa imgui.h çağırırıq
+#include "Menu/Menu.h"
 #include "dobby.h"
 
 // --- Riyaziyyat Strukturları ---
