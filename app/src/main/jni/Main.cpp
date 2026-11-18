@@ -174,21 +174,19 @@ void AimbotThread() {
 }
 
 // =====================================================================
-// JNI FUNKSİYALARI (Setup.cpp xətasını həll etmək üçün)
+// JNI FUNKSİYALARI (Setup.cpp-in axtardığı C++ formatında)
 // =====================================================================
 
-extern "C" JNIEXPORT jobjectArray JNICALL
-GetFeatureList(JNIEnv* env, jobject thiz) {
+jobjectArray GetFeatureList(JNIEnv* env, jobject thiz) {
     const char* features[] = {"Aimbot (Head)"};
     jobjectArray ret = (jobjectArray)env->NewObjectArray(1, env->FindClass("java/lang/String"), env->NewStringUTF(""));
     env->SetObjectArrayElement(ret, 0, env->NewStringUTF(features[0]));
     return ret;
 }
 
-extern "C" JNIEXPORT void JNICALL
-Changes(JNIEnv* env, jclass clazz, jobject thiz, jint feature, jstring type, jint value, jlong lvalue, jboolean bvalue, jstring svalue) {
+void Changes(JNIEnv* env, jclass clazz, jobject thiz, jint feature, jstring type, jint value, jlong lvalue, jboolean bvalue, jstring svalue) {
     if (feature == 0) {
-        aimbot_enabled = bvalue; // Menyudan toggle ediləndə işə düşür
+        aimbot_enabled = bvalue;
     }
 }
 
