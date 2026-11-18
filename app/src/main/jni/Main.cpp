@@ -39,11 +39,11 @@ struct Matrix4x4 {
 #define OFFSET_AimController_SetTarget   0x42EC7E4
 #define OFFSET_Transform_GetPosition     0x77CF6F4
 
-// --- Menyu Dəyişənləri ---
-bool aimbot_enabled = false; 
-bool team_check = true;
-float aimbot_fov = 15.0f;
-float aimbot_max_dist = 150.0f;
+// --- Menyu Dəyişənləri (TEST ÜÇÜN MAKSİMUM) ---
+bool aimbot_enabled = true;        // Default aktivdir
+bool team_check = false;           // Komanda yoxlaması söndürüldü (hər kəsə çəksin)
+float aimbot_fov = 360.0f;         // FOV maksimum
+float aimbot_max_dist = 9999.0f;   // Məsafə limitsiz
 
 // --- Oyun Daxili Dəyişənlər ---
 std::vector<void*> playerList;
@@ -169,12 +169,12 @@ void AimbotThread() {
                 }
             }
         }
-        usleep(5000);
+        usleep(5000); // 5ms
     }
 }
 
 // =====================================================================
-// JNI FUNKSİYALARI (Setup.cpp-in axtardığı C++ formatında)
+// JNI FUNKSİYALARI (Setup.cpp xətasını həll etmək üçün)
 // =====================================================================
 
 jobjectArray GetFeatureList(JNIEnv* env, jobject thiz) {
