@@ -1,4 +1,4 @@
-// language: C++, file: main.cpp, target: Android arm64-v8a (IL2CPP)
+// language: C++, file: Main.cpp, target: Android arm64-v8a (IL2CPP)
 #include <jni.h>
 #include <string>
 #include <vector>
@@ -10,7 +10,6 @@
 #include <unistd.h>
 #include "Includes/Logger.h"
 #include "Includes/obfuscate.h"
-#include "Includes/Utils.h"
 #include "Menu/Menu.h"
 #include "dobby.h"
 
