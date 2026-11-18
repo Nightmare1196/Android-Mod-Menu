@@ -13,12 +13,11 @@
 #include <cstring>
 #include <android/log.h>
 
-// Şablonun öz logger-inə ehtiyacımız olmasın deyə birbaşa log yazırıq
 #define LOG_TAG "PHANTOM_AIMBOT"
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, LOG_TAG, __VA_ARGS__)
 #define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, LOG_TAG, __VA_ARGS__)
 
-// Dobby kitabxanası (şablonda default olaraq link olunub)
+// Dobby hook üçün xarici funksiya
 extern "C" int DobbyHook(void *address, void *replace_call, void **origin_call);
 
 // --- Riyaziyyat Strukturları ---
@@ -39,7 +38,7 @@ struct Matrix4x4 {
 #define OFFSET_PlayerController_OnEnable 0x42B9630
 #define OFFSET_PlayerController_OnDisable 0x42B96B8
 #define OFFSET_AimController_SetTarget   0x42EC7E4
-#define OFFSET_Transform_GetPosition     0x77CF6F4 // get_position_Injected
+#define OFFSET_Transform_GetPosition     0x77CF6F4
 
 // --- Menyu Dəyişənləri (Test üçün default aktivdir) ---
 bool aimbot_enabled = true; 
@@ -75,7 +74,7 @@ uintptr_t get_module_base(const char* module_name) {
 
 bool IsValidPtr(void* obj) {
     if (!obj) return false;
-    return *(void**)((uintptr_t)obj + 0x10) != nullptr; // m_CachedPtr
+    return *(void**)((uintptr_t)obj + 0x10) != nullptr;
 }
 
 Vector3 GetPosition(void* transform) {
@@ -115,18 +114,17 @@ void AimbotThread() {
             void* mainCam = mainCamGetInstance();
             
             if (mainCam) {
-                auto localPlayer = *(void**)((uintptr_t)mainCam + 0x40); // cfld (Local Player)
+                auto localPlayer = *(void**)((uintptr_t)mainCam + 0x40); 
                 
                 if (localPlayer && IsValidPtr(localPlayer)) {
-                    uint8_t localTeam = *(uint8_t*)((uintptr_t)localPlayer + 0x79); // cfio (Team)
-                    auto localAim = *(void**)((uintptr_t)localPlayer + 0xD0);       // cfiz (AimController)
+                    uint8_t localTeam = *(uint8_t*)((uintptr_t)localPlayer + 0x79); 
+                    auto localAim = *(void**)((uintptr_t)localPlayer + 0xD0);       
                     
                     if (localAim) {
-                        auto camTransform = *(void**)((uintptr_t)localAim + 0x78);  // camTransform
+                        auto camTransform = *(void**)((uintptr_t)localAim + 0x78);  
                         
                         if (camTransform) {
                             Vector3 camPos = GetPosition(camTransform);
-                            
                             Matrix4x4 camMat = *(Matrix4x4*)((uintptr_t)camTransform + 0x80);
                             Vector3 camForward = { camMat.m02, camMat.m12, camMat.m22 };
                             
@@ -140,14 +138,13 @@ void AimbotThread() {
                                 if (!IsValidPtr(player)) continue;
                                 if (team_check && *(uint8_t*)((uintptr_t)player + 0x79) == localTeam) continue;
                                 
-                                auto biped = *(void**)((uintptr_t)player + 0x30); // _characterBiped
+                                auto biped = *(void**)((uintptr_t)player + 0x30); 
                                 if (!biped) continue;
                                 
-                                auto headTrans = *(void**)((uintptr_t)biped + 0x20); // Head Transform
+                                auto headTrans = *(void**)((uintptr_t)biped + 0x20); 
                                 if (!headTrans) continue;
                                 
                                 Vector3 headPos = GetPosition(headTrans);
-                                
                                 Vector3 dir = headPos - camPos;
                                 float dist = std::sqrt(dir.x*dir.x + dir.y*dir.y + dir.z*dir.z);
                                 if (dist > aimbot_max_dist) continue;
@@ -173,15 +170,22 @@ void AimbotThread() {
                 }
             }
         }
-        usleep(5000); // 5ms
+        usleep(5000);
     }
 }
 
-// --- JNI OnLoad ---
-extern "C" JNIEXPORT jint JNI_OnLoad(JavaVM *vm, void *reserved) {
-    il2cpp_base = get_module_base("libil2cpp.so");
-    
-    if (il2cpp_base) {
+// --- XÜSUSİ FUNKSIYA: Kitabxana yüklənəndə avtomatik işə düşür (JNI_OnLoad yerinə) ---
+__attribute__((constructor))
+void InitAimbot() {
+    std::thread([]() {
+        // libil2cpp.so yüklənənə qədər gözləyirik
+        while (!il2cpp_base) {
+            il2cpp_base = get_module_base("libil2cpp.so");
+            if (!il2cpp_base) {
+                usleep(100000); // 100ms gözlə
+            }
+        }
+        
         GetTransformPosition = (GetPositionFn)(il2cpp_base + OFFSET_Transform_GetPosition);
         
         void* targetOnEnable = (void*)(il2cpp_base + OFFSET_PlayerController_OnEnable);
@@ -190,12 +194,8 @@ extern "C" JNIEXPORT jint JNI_OnLoad(JavaVM *vm, void *reserved) {
         void* targetOnDisable = (void*)(il2cpp_base + OFFSET_PlayerController_OnDisable);
         DobbyHook(targetOnDisable, (void*)PlayerController_OnDisable, (void**)&old_PlayerController_OnDisable);
         
-        std::thread(AimbotThread).detach();
+        LOGI("PHANTOM: Aimbot hazırdır. Baza: %p", (void*)il2cpp_base);
         
-        LOGI("PHANTOM: Hooklar yerləşdirildi. Baza: %p", (void*)il2cpp_base);
-    } else {
-        LOGE("PHANTOM XƏTA: libil2cpp.so tapılmadı!");
-    }
-
-    return JNI_VERSION_1_6;
+        std::thread(AimbotThread).detach();
+    }).detach();
 }
