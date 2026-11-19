@@ -1,218 +1,201 @@
-// language: C++, file: Main.cpp, target: Android arm64-v8a (IL2CPP)
-#include <jni.h>
-#include <string>
-#include <vector>
-#include <thread>
-#include <chrono>
+// StandChillow 2.07 (offline) - 1-ci addim: yukleme + oxuma testi (nisan almir, yalniz log yazir)
+// Hedef: Android arm64-v8a, IL2CPP. Java/JNI hissesi YOXDUR (JNI_OnLoad yoxdur).
 #include <cmath>
-#include <mutex>
-#include <algorithm>
-#include <unistd.h>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <ctime>
+#include <unistd.h>
+#include <pthread.h>
+#include <vector>
+#include <algorithm>
 #include <android/log.h>
 
-#define LOG_TAG "PHANTOM_AIMBOT"
-#define LOGI(...) __android_log_print(ANDROID_LOG_INFO, LOG_TAG, __VA_ARGS__)
-#define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, LOG_TAG, __VA_ARGS__)
+#define TAG "PHANTOM_AIMBOT"
+#define LOGI(...) __android_log_print(ANDROID_LOG_INFO, TAG, __VA_ARGS__)
+#define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, TAG, __VA_ARGS__)
 
 extern "C" int DobbyHook(void *address, void *replace_call, void **origin_call);
 
-// --- Riyaziyyat Strukturları ---
-struct Vector3 {
-    float x, y, z;
-    Vector3 operator-(const Vector3& o) const { return {x - o.x, y - o.y, z - o.z}; }
-};
+struct Vector3 { float x, y, z; };
 
-struct Matrix4x4 {
-    float m00, m10, m20, m30;
-    float m01, m11, m21, m31;
-    float m02, m12, m22, m32;
-    float m03, m13, m23, m33;
-};
+// ---------------- RVA-lar (dump.cs, StandChillow 2.07) ----------------
+static const uintptr_t RVA_CAM_GETINSTANCE = 0x42BD014; // PlayerMainCamera.oec() static
+static const uintptr_t RVA_PC_ONENABLE     = 0x42B9630; // PlayerController.OnEnable
+static const uintptr_t RVA_PC_ONDISABLE    = 0x42B96B8; // PlayerController.OnDisable
+static const uintptr_t RVA_PC_LATEUPDATE   = 0x42B990C; // PlayerController.LateUpdate
+static const uintptr_t RVA_TR_GETPOS       = 0x77D3690; // Transform.get_position
+static const uintptr_t RVA_TR_GETFWD       = 0x77D3BE0; // Transform.get_forward
+static const uintptr_t RVA_OFFLINE_START   = 0x416AFD0; // OfflineModeController.mco
+static const uintptr_t RVA_OFFLINE_STOP    = 0x416B010; // OfflineModeController.mcp
+static const uintptr_t RVA_AIM_PGL         = 0x42EC7E4; // AimController.pgl(Vector3) - isleyisi yoxlanmayib
 
-// --- Offsetlər (StandChillow 2.07 F1) ---
-#define OFFSET_PlayerMainCamera_Instance 0x42BD014
-#define OFFSET_PlayerController_OnEnable 0x42B9630
-#define OFFSET_PlayerController_OnDisable 0x42B96B8
-#define OFFSET_AimController_SetTarget   0x42EC7E4
-#define OFFSET_Transform_GetPosition     0x77CF6F4
+// ---------------- Sahe ofsetleri (dump.cs) ----------------
+static const uintptr_t OFF_CAM_LOCALPLAYER = 0x40; // PlayerMainCamera -> PlayerController
+static const uintptr_t OFF_PC_BIPED        = 0x30; // PlayerController -> BipedMap
+static const uintptr_t OFF_PC_TEAM         = 0x79; // PlayerController -> Team (byte)
+static const uintptr_t OFF_PC_AIM          = 0xD0; // PlayerController -> AimController
+static const uintptr_t OFF_BIPED_HEAD      = 0x20; // BipedMap -> Head (Transform)
+static const uintptr_t OFF_AIM_CAMTRANS    = 0x78; // AimController -> camTransform
 
-// --- Menyu Dəyişənləri (TEST ÜÇÜN MAKSİMUM) ---
-bool aimbot_enabled = true;        // Default aktivdir
-bool team_check = false;           // Komanda yoxlaması söndürüldü (hər kəsə çəksin)
-float aimbot_fov = 360.0f;         // FOV maksimum
-float aimbot_max_dist = 9999.0f;   // Məsafə limitsiz
+// ---------------- Ayarlar ----------------
+static bool  g_enabled       = true;
+static bool  g_teamCheck     = true;   // eyni komandani kecir
+static bool  g_requireOffline= true;   // yalniz offline rejimde isleyir
+static bool  g_applyAim      = false;  // 1-ci addimda SONDURULUB (yalniz log)
+static float g_maxDist       = 200.0f;
 
-// --- Oyun Daxili Dəyişənlər ---
-std::vector<void*> playerList;
-std::mutex playerMutex;
-uintptr_t il2cpp_base = 0;
+// ---------------- Veziyyet (hamisi Unity esas thread-indedir) ----------------
+static uintptr_t g_base = 0;
+static bool g_offline = false;
+static std::vector<void*> g_players;
 
-// --- Funksiya Pointerləri ---
-typedef void (*GetPositionFn)(void*, Vector3*);
-GetPositionFn GetTransformPosition = nullptr;
+typedef Vector3 (*Vec3Fn)(void*, void*);
+static Vec3Fn TrGetPos = nullptr;
+static Vec3Fn TrGetFwd = nullptr;
+typedef void* (*GetInstFn)(void*);
+static GetInstFn CamGetInstance = nullptr;
+typedef void (*PglFn)(void*, Vector3, void*);
+static PglFn AimPgl = nullptr;
 
-// --- Köməkçi Funksiyalar ---
-uintptr_t get_module_base(const char* module_name) {
+static uintptr_t get_module_base(const char *name) {
     uintptr_t base = 0;
     FILE *fp = fopen("/proc/self/maps", "r");
-    if (fp) {
-        char line[512];
-        while (fgets(line, sizeof(line), fp)) {
-            if (strstr(line, module_name)) {
-                base = strtoul(line, NULL, 16);
-                break;
-            }
-        }
-        fclose(fp);
+    if (!fp) return 0;
+    char line[512];
+    while (fgets(line, sizeof(line), fp)) {
+        if (strstr(line, name)) { base = strtoul(line, nullptr, 16); break; }
     }
+    fclose(fp);
     return base;
 }
 
-bool IsValidPtr(void* obj) {
-    if (!obj) return false;
-    return *(void**)((uintptr_t)obj + 0x10) != nullptr;
+static inline bool PtrOk(void *p) {
+    uintptr_t v = (uintptr_t)p;
+    return v > 0x10000 && v < 0x0000800000000000ULL && (v & 7) == 0;
 }
 
-Vector3 GetPosition(void* transform) {
-    Vector3 pos = {0, 0, 0};
-    if (transform && GetTransformPosition) {
-        GetTransformPosition(transform, &pos);
+// Unity obyektinin native hissesi (m_CachedPtr, +0x10) bos deyilse obyekt sagdir
+static inline bool UnityAlive(void *obj) {
+    if (!PtrOk(obj)) return false;
+    return *(void **)((uintptr_t)obj + 0x10) != nullptr;
+}
+
+static void *GetLocalPlayer() {
+    if (!CamGetInstance) return nullptr;
+    void *cam = CamGetInstance(nullptr);
+    if (!PtrOk(cam)) return nullptr;
+    void *lp = *(void **)((uintptr_t)cam + OFF_CAM_LOCALPLAYER);
+    return UnityAlive(lp) ? lp : nullptr;
+}
+
+static void *GetHead(void *player) {
+    void *biped = *(void **)((uintptr_t)player + OFF_PC_BIPED);
+    if (!PtrOk(biped)) return nullptr;
+    void *head = *(void **)((uintptr_t)biped + OFF_BIPED_HEAD);
+    return UnityAlive(head) ? head : nullptr;
+}
+
+// ---------------- Hook-lar ----------------
+static void (*old_OnEnable)(void *, void *);
+static void hk_OnEnable(void *self, void *mi) {
+    if (self && std::find(g_players.begin(), g_players.end(), self) == g_players.end())
+        g_players.push_back(self);
+    old_OnEnable(self, mi);
+}
+
+static void (*old_OnDisable)(void *, void *);
+static void hk_OnDisable(void *self, void *mi) {
+    g_players.erase(std::remove(g_players.begin(), g_players.end(), self), g_players.end());
+    old_OnDisable(self, mi);
+}
+
+static void (*old_OffStart)(void *, void *);
+static void hk_OffStart(void *self, void *mi) {
+    g_offline = true;
+    LOGI("Offline rejim BASLADI");
+    old_OffStart(self, mi);
+}
+
+static void (*old_OffStop)(void *, void *);
+static void hk_OffStop(void *self, void *mi) {
+    g_offline = false;
+    LOGI("Offline rejim BITDI");
+    old_OffStop(self, mi);
+}
+
+static void Tick(void *local) {
+    void *aim = *(void **)((uintptr_t)local + OFF_PC_AIM);
+    if (!PtrOk(aim)) return;
+    void *camT = *(void **)((uintptr_t)aim + OFF_AIM_CAMTRANS);
+    if (!UnityAlive(camT)) return;
+
+    Vector3 cp = TrGetPos(camT, nullptr);
+    Vector3 fw = TrGetFwd(camT, nullptr);
+    uint8_t myTeam = *(uint8_t *)((uintptr_t)local + OFF_PC_TEAM);
+
+    void *best = nullptr; float bestDist = 1e9f; float bestAng = 0; Vector3 bestHead{0, 0, 0};
+    for (void *p : g_players) {
+        if (p == local || !UnityAlive(p)) continue;
+        if (g_teamCheck && *(uint8_t *)((uintptr_t)p + OFF_PC_TEAM) == myTeam) continue;
+        void *h = GetHead(p);
+        if (!h) continue;
+        Vector3 hp = TrGetPos(h, nullptr);
+        Vector3 d{hp.x - cp.x, hp.y - cp.y, hp.z - cp.z};
+        float dist = std::sqrt(d.x * d.x + d.y * d.y + d.z * d.z);
+        if (dist < 0.1f || dist > g_maxDist) continue;
+        float c = (d.x * fw.x + d.y * fw.y + d.z * fw.z) / dist;
+        c = std::max(-1.0f, std::min(1.0f, c));
+        if (dist < bestDist) { bestDist = dist; best = p; bestHead = hp; bestAng = std::acos(c) * 57.29578f; }
     }
-    return pos;
-}
 
-// --- Hook Funksiyaları ---
-void (*old_PlayerController_OnEnable)(void*);
-void PlayerController_OnEnable(void* instance) {
-    if (instance) {
-        std::lock_guard<std::mutex> lock(playerMutex);
-        if (std::find(playerList.begin(), playerList.end(), instance) == playerList.end()) {
-            playerList.push_back(instance);
-        }
+    static time_t last = 0;
+    time_t now = time(nullptr);
+    if (now != last) {
+        last = now;
+        if (best) LOGI("oyuncu=%zu en yaxin dusmen: mesafe=%.1f bucaq=%.1f", g_players.size(), bestDist, bestAng);
+        else      LOGI("oyuncu=%zu dusmen tapilmadi", g_players.size());
     }
-    old_PlayerController_OnEnable(instance);
+
+    if (g_applyAim && best && AimPgl) AimPgl(aim, bestHead, nullptr);
 }
 
-void (*old_PlayerController_OnDisable)(void*);
-void PlayerController_OnDisable(void* instance) {
-    if (instance) {
-        std::lock_guard<std::mutex> lock(playerMutex);
-        playerList.erase(std::remove(playerList.begin(), playerList.end(), instance), playerList.end());
-    }
-    old_PlayerController_OnDisable(instance);
+static void (*old_LateUpdate)(void *, void *);
+static void hk_LateUpdate(void *self, void *mi) {
+    old_LateUpdate(self, mi);
+    if (!g_enabled) return;
+    if (g_requireOffline && !g_offline) return;
+    void *local = GetLocalPlayer();
+    if (local && self == local) Tick(local);
 }
 
-// --- Aimbot Dövrü ---
-void AimbotThread() {
-    while (true) {
-        if (aimbot_enabled && il2cpp_base) {
-            auto mainCamGetInstance = (void*(*)())(il2cpp_base + OFFSET_PlayerMainCamera_Instance);
-            void* mainCam = mainCamGetInstance();
-            
-            if (mainCam) {
-                auto localPlayer = *(void**)((uintptr_t)mainCam + 0x40); 
-                
-                if (localPlayer && IsValidPtr(localPlayer)) {
-                    uint8_t localTeam = *(uint8_t*)((uintptr_t)localPlayer + 0x79); 
-                    auto localAim = *(void**)((uintptr_t)localPlayer + 0xD0);       
-                    
-                    if (localAim) {
-                        auto camTransform = *(void**)((uintptr_t)localAim + 0x78);  
-                        
-                        if (camTransform) {
-                            Vector3 camPos = GetPosition(camTransform);
-                            Matrix4x4 camMat = *(Matrix4x4*)((uintptr_t)camTransform + 0x80);
-                            Vector3 camForward = { camMat.m02, camMat.m12, camMat.m22 };
-                            
-                            void* bestTarget = nullptr;
-                            float bestDist = 999999.0f;
-                            Vector3 bestHeadPos = {0, 0, 0};
-                            
-                            std::lock_guard<std::mutex> lock(playerMutex);
-                            for (auto player : playerList) {
-                                if (player == localPlayer) continue;
-                                if (!IsValidPtr(player)) continue;
-                                if (team_check && *(uint8_t*)((uintptr_t)player + 0x79) == localTeam) continue;
-                                
-                                auto biped = *(void**)((uintptr_t)player + 0x30); 
-                                if (!biped) continue;
-                                
-                                auto headTrans = *(void**)((uintptr_t)biped + 0x20); 
-                                if (!headTrans) continue;
-                                
-                                Vector3 headPos = GetPosition(headTrans);
-                                Vector3 dir = headPos - camPos;
-                                float dist = std::sqrt(dir.x*dir.x + dir.y*dir.y + dir.z*dir.z);
-                                if (dist > aimbot_max_dist) continue;
-                                
-                                float dot = (dir.x*camForward.x + dir.y*camForward.y + dir.z*camForward.z) / dist;
-                                float cosFov = std::cos(aimbot_fov * 0.5f * 3.14159265f / 180.0f);
-                                if (dot < cosFov) continue;
-                                
-                                if (dist < bestDist) {
-                                    bestDist = dist;
-                                    bestTarget = player;
-                                    bestHeadPos = headPos;
-                                }
-                            }
-                            
-                            if (bestTarget) {
-                                typedef void (*AimSetTarget)(void*, Vector3);
-                                AimSetTarget setTarget = (AimSetTarget)(il2cpp_base + OFFSET_AimController_SetTarget);
-                                setTarget(localAim, bestHeadPos);
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        usleep(5000); // 5ms
-    }
+// ---------------- Baslatma ----------------
+static void Hook(const char *name, uintptr_t rva, void *rep, void **orig) {
+    int r = DobbyHook((void *)(g_base + rva), rep, orig);
+    LOGI("hook %s @%p -> %d", name, (void *)(g_base + rva), r);
 }
 
-// =====================================================================
-// JNI FUNKSİYALARI (Setup.cpp xətasını həll etmək üçün)
-// =====================================================================
+static void *InitThread(void *) {
+    while (!(g_base = get_module_base("libil2cpp.so"))) usleep(100000);
+    LOGI("libil2cpp baza: %p", (void *)g_base);
+    sleep(8); // oyunun yuklenmesini gozle (tez hook cokme verir)
 
-jobjectArray GetFeatureList(JNIEnv* env, jobject thiz) {
-    const char* features[] = {"Aimbot (Head)"};
-    jobjectArray ret = (jobjectArray)env->NewObjectArray(1, env->FindClass("java/lang/String"), env->NewStringUTF(""));
-    env->SetObjectArrayElement(ret, 0, env->NewStringUTF(features[0]));
-    return ret;
+    TrGetPos = (Vec3Fn)(g_base + RVA_TR_GETPOS);
+    TrGetFwd = (Vec3Fn)(g_base + RVA_TR_GETFWD);
+    CamGetInstance = (GetInstFn)(g_base + RVA_CAM_GETINSTANCE);
+    AimPgl = (PglFn)(g_base + RVA_AIM_PGL);
+
+    Hook("OnEnable",   RVA_PC_ONENABLE,   (void *)hk_OnEnable,   (void **)&old_OnEnable);
+    Hook("OnDisable",  RVA_PC_ONDISABLE,  (void *)hk_OnDisable,  (void **)&old_OnDisable);
+    Hook("LateUpdate", RVA_PC_LATEUPDATE, (void *)hk_LateUpdate, (void **)&old_LateUpdate);
+    Hook("OffStart",   RVA_OFFLINE_START, (void *)hk_OffStart,   (void **)&old_OffStart);
+    Hook("OffStop",    RVA_OFFLINE_STOP,  (void *)hk_OffStop,    (void **)&old_OffStop);
+    LOGI("hazirdir");
+    return nullptr;
 }
 
-void Changes(JNIEnv* env, jclass clazz, jobject thiz, jint feature, jstring type, jint value, jlong lvalue, jboolean bvalue, jstring svalue) {
-    if (feature == 0) {
-        aimbot_enabled = bvalue;
-    }
-}
-
-// =====================================================================
-
-// --- XÜSUSİ FUNKSIYA: Kitabxana yüklənəndə avtomatik işə düşür ---
 __attribute__((constructor))
-void InitAimbot() {
-    std::thread([]() {
-        while (!il2cpp_base) {
-            il2cpp_base = get_module_base("libil2cpp.so");
-            if (!il2cpp_base) {
-                usleep(100000);
-            }
-        }
-        
-        GetTransformPosition = (GetPositionFn)(il2cpp_base + OFFSET_Transform_GetPosition);
-        
-        void* targetOnEnable = (void*)(il2cpp_base + OFFSET_PlayerController_OnEnable);
-        DobbyHook(targetOnEnable, (void*)PlayerController_OnEnable, (void**)&old_PlayerController_OnEnable);
-        
-        void* targetOnDisable = (void*)(il2cpp_base + OFFSET_PlayerController_OnDisable);
-        DobbyHook(targetOnDisable, (void*)PlayerController_OnDisable, (void**)&old_PlayerController_OnDisable);
-        
-        LOGI("PHANTOM: Aimbot hazırdır. Baza: %p", (void*)il2cpp_base);
-        
-        std::thread(AimbotThread).detach();
-    }).detach();
+static void ModInit() {
+    pthread_t t;
+    if (pthread_create(&t, nullptr, InitThread, nullptr) == 0) pthread_detach(t);
 }
