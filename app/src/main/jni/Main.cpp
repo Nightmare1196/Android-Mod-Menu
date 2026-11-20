@@ -67,7 +67,7 @@ static const uintptr_t OFF_AIM_HEADANGLES  = 0xB8; // AimController -> _headDire
 static bool  g_enabled       = true;
 static bool  g_teamCheck     = true;   // eyni komandani kecir
 static bool  g_requireOffline= false;  // DIAQNOSTIKA: offline bayragi tetiklenmirse de oxuma isleyir (2.07 yalniz offline-dir)
-static bool  g_applyAim      = false;  // DIAQNOSTIKA: nisan SONDURULUB, baxis bucaqlarinin harada saxlandigini oyrenirik
+static bool  g_applyAim      = true;   // nisan aciq: oyunun oz baxis veziyyetine (AimingData) yazir
 static float g_maxDist       = 200.0f;
 static float g_fov           = 60.0f;  // derece: yalniz bu konusun icindeki dusmenlere (nisangahdan ucaqliq)
 static float g_smooth        = 1.0f;   // 0..1, boyuk = tez ceikir
@@ -220,6 +220,19 @@ static void Tick(void *local) {
         float tpitch = -std::asin(std::max(-1.0f, std::min(1.0f, dd.y / bestDist))) * 57.29578f;
         float ny = curYaw + NormDeg(tyaw - curYaw) * g_smooth;
         float np = curPitch + (tpitch - curPitch) * g_smooth;
+        ny = std::fmod(ny + 360.0f, 360.0f);
+        // Pitch hududu (oyunun oz minimumX/maximumX deyerleri, munasibdirse)
+        float minX = *(float *)((uintptr_t)aim + 0x94), maxX = *(float *)((uintptr_t)aim + 0x98);
+        if (minX < maxX && minX > -91.0f && maxX < 91.0f) np = std::max(minX, std::min(maxX, np));
+        // Oyunun ozunun baxis veziyyetini yaziriq: curAimAngle=(pitch,yaw,0), curEulerAngles=(0,yaw,0) (beden)
+        void *ad = *(void **)((uintptr_t)aim + 0x80);
+        if (PtrOk(ad)) {
+            Vector3 *caa = (Vector3 *)((uintptr_t)ad + 0x18);
+            Vector3 *ce  = (Vector3 *)((uintptr_t)ad + 0x24);
+            caa->x = np; caa->y = ny;
+            ce->y = ny;
+        }
+        // Bu kadrin gorunusu da uygun olsun
         TrSetEuler(camT, Vector3{np, ny, 0.0f}, nullptr);
         applied = true;
     }
