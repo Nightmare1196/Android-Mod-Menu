@@ -1,6 +1,7 @@
 // StandChillow 2.07 (offline) - 1-ci addim: yukleme + oxuma testi (nisan almir, yalniz log yazir)
 // Hedef: Android arm64-v8a, IL2CPP. Java/JNI hissesi YOXDUR (JNI_OnLoad yoxdur).
 #include <cmath>
+#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -11,9 +12,30 @@
 #include <algorithm>
 #include <android/log.h>
 
+#include <cstdarg>
+#include <sys/stat.h>
+
 #define TAG "PHANTOM_AIMBOT"
-#define LOGI(...) __android_log_print(ANDROID_LOG_INFO, TAG, __VA_ARGS__)
-#define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, TAG, __VA_ARGS__)
+#define LOG_DIR  "/storage/emulated/0/Android/data/com.Nightmare.Custom1/files"
+#define LOG_FILE LOG_DIR "/mod_log.txt"
+
+// Hem logcat-a, hem de faila yazir (logcat gorunmese fayla baxmaq ucun)
+static void LogBoth(const char *fmt, ...) {
+    char buf[512];
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(buf, sizeof(buf), fmt, ap);
+    va_end(ap);
+    __android_log_print(ANDROID_LOG_INFO, TAG, "%s", buf);
+    static int lines = 0;
+    if (lines < 3000) {
+        mkdir(LOG_DIR, 0777);
+        FILE *f = fopen(LOG_FILE, "a");
+        if (f) { fprintf(f, "%s\n", buf); fclose(f); lines++; }
+    }
+}
+#define LOGI(...) LogBoth(__VA_ARGS__)
+#define LOGE(...) LogBoth(__VA_ARGS__)
 
 extern "C" int DobbyHook(void *address, void *replace_call, void **origin_call);
 
@@ -196,6 +218,7 @@ static void *InitThread(void *) {
 
 __attribute__((constructor))
 static void ModInit() {
+    LOGI("MyLibName YUKLENDI (constructor)");
     pthread_t t;
     if (pthread_create(&t, nullptr, InitThread, nullptr) == 0) pthread_detach(t);
 }
