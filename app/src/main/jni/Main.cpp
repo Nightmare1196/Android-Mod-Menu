@@ -72,6 +72,9 @@ static float g_maxDist       = 200.0f;
 static float g_fov           = 60.0f;  // derece: yalniz bu konusun icindeki dusmenlere (nisangahdan ucaqliq)
 static float g_smooth        = 1.0f;   // 0..1, boyuk = tez ceikir
 
+#define BUILD_ID "v7-aim-write-heartbeat"
+static unsigned g_cntEnable = 0, g_cntLate = 0, g_cntTick = 0, g_cntApplied = 0;
+
 // ---------------- Veziyyet (hamisi Unity esas thread-indedir) ----------------
 static uintptr_t g_base = 0;
 static bool g_offline = false;
@@ -129,6 +132,7 @@ static void *GetHead(void *player) {
 // ---------------- Hook-lar ----------------
 static void (*old_OnEnable)(void *, void *);
 static void hk_OnEnable(void *self, void *mi) {
+    g_cntEnable++;
     if (self && std::find(g_players.begin(), g_players.end(), self) == g_players.end()) {
         g_players.push_back(self);
         static int n = 0;
@@ -160,6 +164,7 @@ static void hk_OffStop(void *self, void *mi) {
 static float NormDeg(float a) { while (a > 180.0f) a -= 360.0f; while (a < -180.0f) a += 360.0f; return a; }
 
 static void Tick(void *local) {
+    g_cntTick++;
     void *aim = *(void **)((uintptr_t)local + OFF_PC_AIM);
     if (!PtrOk(aim)) return;
     void *camT = *(void **)((uintptr_t)aim + OFF_AIM_CAMTRANS);
@@ -235,6 +240,7 @@ static void Tick(void *local) {
         // Bu kadrin gorunusu da uygun olsun
         TrSetEuler(camT, Vector3{np, ny, 0.0f}, nullptr);
         applied = true;
+        g_cntApplied++;
     }
 
     static time_t last = 0;
@@ -248,6 +254,7 @@ static void Tick(void *local) {
 
 static void (*old_LateUpdate)(void *, void *);
 static void hk_LateUpdate(void *self, void *mi) {
+    g_cntLate++;
     old_LateUpdate(self, mi);
     if (!g_enabled) return;
     void *local = GetLocalPlayer();
@@ -285,12 +292,18 @@ static void *InitThread(void *) {
     Hook("OffStart",   RVA_OFFLINE_START, (void *)hk_OffStart,   (void **)&old_OffStart);
     Hook("OffStop",    RVA_OFFLINE_STOP,  (void *)hk_OffStop,    (void **)&old_OffStop);
     LOGI("hazirdir");
+    // Ureyin vurusu: her 5 san hook-larin cagirilib-cagirilmadigini yazir (maksimum ~10 deqiqe)
+    for (int i = 0; i < 120; i++) {
+        sleep(5);
+        LOGI("heartbeat: enable=%u late=%u tick=%u aim=%u oyuncular=%zu",
+             g_cntEnable, g_cntLate, g_cntTick, g_cntApplied, g_players.size());
+    }
     return nullptr;
 }
 
 __attribute__((constructor))
 static void ModInit() {
-    LOGI("MyLibName YUKLENDI (constructor)");
+    LOGI("MyLibName YUKLENDI (constructor) build=%s", BUILD_ID);
     pthread_t t;
     if (pthread_create(&t, nullptr, InitThread, nullptr) == 0) pthread_detach(t);
 }
