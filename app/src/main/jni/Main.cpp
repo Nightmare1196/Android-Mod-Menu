@@ -63,7 +63,7 @@ static const uintptr_t OFF_AIM_CAMTRANS    = 0x78; // AimController -> camTransf
 // ---------------- Ayarlar ----------------
 static bool  g_enabled       = true;
 static bool  g_teamCheck     = true;   // eyni komandani kecir
-static bool  g_requireOffline= true;   // yalniz offline rejimde isleyir
+static bool  g_requireOffline= false;  // DIAQNOSTIKA: offline bayragi tetiklenmirse de oxuma isleyir (2.07 yalniz offline-dir)
 static bool  g_applyAim      = false;  // 1-ci addimda SONDURULUB (yalniz log)
 static float g_maxDist       = 200.0f;
 
@@ -121,8 +121,11 @@ static void *GetHead(void *player) {
 // ---------------- Hook-lar ----------------
 static void (*old_OnEnable)(void *, void *);
 static void hk_OnEnable(void *self, void *mi) {
-    if (self && std::find(g_players.begin(), g_players.end(), self) == g_players.end())
+    if (self && std::find(g_players.begin(), g_players.end(), self) == g_players.end()) {
         g_players.push_back(self);
+        static int n = 0;
+        if (n++ < 20) LOGI("OnEnable #%d obyekt=%p oyuncular=%zu", n, self, g_players.size());
+    }
     old_OnEnable(self, mi);
 }
 
@@ -186,8 +189,14 @@ static void (*old_LateUpdate)(void *, void *);
 static void hk_LateUpdate(void *self, void *mi) {
     old_LateUpdate(self, mi);
     if (!g_enabled) return;
-    if (g_requireOffline && !g_offline) return;
     void *local = GetLocalPlayer();
+    static time_t lastDiag = 0;
+    time_t now = time(nullptr);
+    if (now != lastDiag && (!local || self == local)) {
+        lastDiag = now;
+        LOGI("diag: offline=%d oyuncular=%zu local=%p", (int)g_offline, g_players.size(), local);
+    }
+    if (g_requireOffline && !g_offline) return;
     if (local && self == local) Tick(local);
 }
 
