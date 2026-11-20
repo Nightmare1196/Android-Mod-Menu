@@ -67,7 +67,7 @@ static const uintptr_t OFF_AIM_HEADANGLES  = 0xB8; // AimController -> _headDire
 static bool  g_enabled       = true;
 static bool  g_teamCheck     = true;   // eyni komandani kecir
 static bool  g_requireOffline= false;  // DIAQNOSTIKA: offline bayragi tetiklenmirse de oxuma isleyir (2.07 yalniz offline-dir)
-static bool  g_applyAim      = true;   // 2-ci addim: kamera hedefe dogru cekilir
+static bool  g_applyAim      = false;  // DIAQNOSTIKA: nisan SONDURULUB, baxis bucaqlarinin harada saxlandigini oyrenirik
 static float g_maxDist       = 200.0f;
 static float g_fov           = 60.0f;  // derece: yalniz bu konusun icindeki dusmenlere (nisangahdan ucaqliq)
 static float g_smooth        = 1.0f;   // 0..1, boyuk = tez ceikir
@@ -164,6 +164,30 @@ static void Tick(void *local) {
     if (!PtrOk(aim)) return;
     void *camT = *(void **)((uintptr_t)aim + OFF_AIM_CAMTRANS);
     if (!UnityAlive(camT)) return;
+
+    // ---- DIAQNOSTIKA: baxis bucaqlari hansi sahede saxlanir? (yalniz oxuyuruq, ~4 defe/san) ----
+    {
+        static long lastMs = 0;
+        timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts);
+        long ms = ts.tv_sec * 1000L + ts.tv_nsec / 1000000L;
+        if (ms - lastMs >= 250) {
+            lastMs = ms;
+            Vector3 ec = TrGetEuler(camT, nullptr);
+            void *ad = *(void **)((uintptr_t)aim + 0x80);              // AimingData
+            Vector3 caa{0, 0, 0}, ce{0, 0, 0};
+            if (PtrOk(ad)) { caa = *(Vector3 *)((uintptr_t)ad + 0x18); ce = *(Vector3 *)((uintptr_t)ad + 0x24); }
+            void *sn = *(void **)((uintptr_t)aim + 0x170);             // AimSnapshot
+            float ax = 0, ay = 0;
+            if (PtrOk(sn)) { ax = *(float *)((uintptr_t)sn + 0x54); ay = *(float *)((uintptr_t)sn + 0x58); }
+            void *spine = *(void **)((uintptr_t)aim + 0x60);           // spineDirector
+            void *fpsc  = *(void **)((uintptr_t)aim + 0x68);           // FPSCamera
+            Vector3 es{0, 0, 0}, ef{0, 0, 0};
+            if (UnityAlive(spine)) es = TrGetEuler(spine, nullptr);
+            if (UnityAlive(fpsc))  ef = TrGetEuler(fpsc, nullptr);
+            LOGI("A cam=(%.1f,%.1f) curAim=(%.1f,%.1f,%.1f) curEul=(%.1f,%.1f,%.1f) snapXY=(%.1f,%.1f) spine=(%.1f,%.1f) fps=(%.1f,%.1f)",
+                 ec.x, ec.y, caa.x, caa.y, caa.z, ce.x, ce.y, ce.z, ax, ay, es.x, es.y, ef.x, ef.y);
+        }
+    }
 
     Vector3 cp = TrGetPos(camT, nullptr);
     Vector3 fw = TrGetFwd(camT, nullptr);
