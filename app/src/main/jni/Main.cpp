@@ -49,6 +49,7 @@ static const uintptr_t RVA_PC_LATEUPDATE   = 0x42B990C; // PlayerController.Late
 static const uintptr_t RVA_TR_GETPOS       = 0x77D3690; // Transform.get_position
 static const uintptr_t RVA_TR_GETFWD       = 0x77D3BE0; // Transform.get_forward
 static const uintptr_t RVA_TR_GETEULER     = 0x77D3880; // Transform.get_eulerAngles
+static const uintptr_t RVA_TR_SETEULER     = 0x77D3918; // Transform.set_eulerAngles
 static const uintptr_t RVA_OFFLINE_START   = 0x416AFD0; // OfflineModeController.mco
 static const uintptr_t RVA_OFFLINE_STOP    = 0x416B010; // OfflineModeController.mcp
 static const uintptr_t RVA_AIM_PGL         = 0x42EC7E4; // AimController.pgl(Vector3) - isleyisi yoxlanmayib
@@ -66,8 +67,10 @@ static const uintptr_t OFF_AIM_HEADANGLES  = 0xB8; // AimController -> _headDire
 static bool  g_enabled       = true;
 static bool  g_teamCheck     = true;   // eyni komandani kecir
 static bool  g_requireOffline= false;  // DIAQNOSTIKA: offline bayragi tetiklenmirse de oxuma isleyir (2.07 yalniz offline-dir)
-static bool  g_applyAim      = false;  // 1-ci addimda SONDURULUB (yalniz log)
+static bool  g_applyAim      = true;   // 2-ci addim: kamera hedefe dogru cekilir
 static float g_maxDist       = 200.0f;
+static float g_fov           = 60.0f;  // derece: yalniz bu konusun icindeki dusmenlere (nisangahdan ucaqliq)
+static float g_smooth        = 1.0f;   // 0..1, boyuk = tez ceikir
 
 // ---------------- Veziyyet (hamisi Unity esas thread-indedir) ----------------
 static uintptr_t g_base = 0;
@@ -78,6 +81,8 @@ typedef Vector3 (*Vec3Fn)(void*, void*);
 static Vec3Fn TrGetPos = nullptr;
 static Vec3Fn TrGetFwd = nullptr;
 static Vec3Fn TrGetEuler = nullptr;
+typedef void (*SetVec3Fn)(void *, Vector3, void *);
+static SetVec3Fn TrSetEuler = nullptr;
 typedef void* (*GetInstFn)(void*);
 static GetInstFn CamGetInstance = nullptr;
 typedef void (*PglFn)(void*, Vector3, void*);
@@ -152,6 +157,8 @@ static void hk_OffStop(void *self, void *mi) {
     old_OffStop(self, mi);
 }
 
+static float NormDeg(float a) { while (a > 180.0f) a -= 360.0f; while (a < -180.0f) a += 360.0f; return a; }
+
 static void Tick(void *local) {
     void *aim = *(void **)((uintptr_t)local + OFF_PC_AIM);
     if (!PtrOk(aim)) return;
@@ -162,7 +169,8 @@ static void Tick(void *local) {
     Vector3 fw = TrGetFwd(camT, nullptr);
     uint8_t myTeam = *(uint8_t *)((uintptr_t)local + OFF_PC_TEAM);
 
-    void *best = nullptr; float bestDist = 1e9f; float bestAng = 0; Vector3 bestHead{0, 0, 0};
+    // Hedef: nisangaha (kamera istiqametine) en yaxin bucaqli dusmen
+    void *best = nullptr; float bestDist = 0; float bestAng = 1e9f; Vector3 bestHead{0, 0, 0};
     for (void *p : g_players) {
         if (p == local || !UnityAlive(p)) continue;
         if (g_teamCheck && *(uint8_t *)((uintptr_t)p + OFF_PC_TEAM) == myTeam) continue;
@@ -174,28 +182,31 @@ static void Tick(void *local) {
         if (dist < 0.1f || dist > g_maxDist) continue;
         float c = (d.x * fw.x + d.y * fw.y + d.z * fw.z) / dist;
         c = std::max(-1.0f, std::min(1.0f, c));
-        if (dist < bestDist) { bestDist = dist; best = p; bestHead = hp; bestAng = std::acos(c) * 57.29578f; }
+        float ang = std::acos(c) * 57.29578f;
+        if (ang < bestAng) { bestAng = ang; bestDist = dist; best = p; bestHead = hp; }
+    }
+
+    bool applied = false;
+    if (best && g_applyAim && TrSetEuler && bestAng <= g_fov) {
+        Vector3 dd{bestHead.x - cp.x, bestHead.y - cp.y, bestHead.z - cp.z};
+        Vector3 eu = TrGetEuler(camT, nullptr);
+        float curYaw = eu.y;
+        float curPitch = eu.x > 180.0f ? eu.x - 360.0f : eu.x;
+        float tyaw = std::atan2(dd.x, dd.z) * 57.29578f; if (tyaw < 0) tyaw += 360.0f;
+        float tpitch = -std::asin(std::max(-1.0f, std::min(1.0f, dd.y / bestDist))) * 57.29578f;
+        float ny = curYaw + NormDeg(tyaw - curYaw) * g_smooth;
+        float np = curPitch + (tpitch - curPitch) * g_smooth;
+        TrSetEuler(camT, Vector3{np, ny, 0.0f}, nullptr);
+        applied = true;
     }
 
     static time_t last = 0;
     time_t now = time(nullptr);
     if (now != last) {
         last = now;
-        if (best) {
-            LOGI("oyuncu=%zu en yaxin dusmen: mesafe=%.1f bucaq=%.1f", g_players.size(), bestDist, bestAng);
-            // 2-ci addim testi: baxis bucaqlari hardadir? (yalniz oxuyuruq)
-            Vector3 hda = *(Vector3 *)((uintptr_t)aim + OFF_AIM_HEADANGLES);
-            Vector3 eu = TrGetEuler(camT, nullptr);
-            Vector3 dd{bestHead.x - cp.x, bestHead.y - cp.y, bestHead.z - cp.z};
-            float tyaw = std::atan2(dd.x, dd.z) * 57.29578f;
-            float tpitch = -std::asin(dd.y / bestDist) * 57.29578f;
-            LOGI("aci: headAngles=(%.1f,%.1f,%.1f) kameraEuler=(%.1f,%.1f,%.1f) hedefYaw=%.1f hedefPitch=%.1f",
-                 hda.x, hda.y, hda.z, eu.x, eu.y, eu.z, tyaw, tpitch);
-        }
+        if (best) LOGI("oyuncu=%zu hedef: mesafe=%.1f bucaq=%.1f aim=%d", g_players.size(), bestDist, bestAng, (int)applied);
         else      LOGI("oyuncu=%zu dusmen tapilmadi", g_players.size());
     }
-
-    if (g_applyAim && best && AimPgl) AimPgl(aim, bestHead, nullptr);
 }
 
 static void (*old_LateUpdate)(void *, void *);
@@ -227,6 +238,7 @@ static void *InitThread(void *) {
     TrGetPos = (Vec3Fn)(g_base + RVA_TR_GETPOS);
     TrGetFwd = (Vec3Fn)(g_base + RVA_TR_GETFWD);
     TrGetEuler = (Vec3Fn)(g_base + RVA_TR_GETEULER);
+    TrSetEuler = (SetVec3Fn)(g_base + RVA_TR_SETEULER);
     CamGetInstance = (GetInstFn)(g_base + RVA_CAM_GETINSTANCE);
     AimPgl = (PglFn)(g_base + RVA_AIM_PGL);
 
