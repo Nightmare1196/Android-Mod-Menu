@@ -48,6 +48,7 @@ static const uintptr_t RVA_PC_ONDISABLE    = 0x42B96B8; // PlayerController.OnDi
 static const uintptr_t RVA_PC_LATEUPDATE   = 0x42B990C; // PlayerController.LateUpdate
 static const uintptr_t RVA_TR_GETPOS       = 0x77D3690; // Transform.get_position
 static const uintptr_t RVA_TR_GETFWD       = 0x77D3BE0; // Transform.get_forward
+static const uintptr_t RVA_TR_GETEULER     = 0x77D3880; // Transform.get_eulerAngles
 static const uintptr_t RVA_OFFLINE_START   = 0x416AFD0; // OfflineModeController.mco
 static const uintptr_t RVA_OFFLINE_STOP    = 0x416B010; // OfflineModeController.mcp
 static const uintptr_t RVA_AIM_PGL         = 0x42EC7E4; // AimController.pgl(Vector3) - isleyisi yoxlanmayib
@@ -59,6 +60,7 @@ static const uintptr_t OFF_PC_TEAM         = 0x79; // PlayerController -> Team (
 static const uintptr_t OFF_PC_AIM          = 0xD0; // PlayerController -> AimController
 static const uintptr_t OFF_BIPED_HEAD      = 0x20; // BipedMap -> Head (Transform)
 static const uintptr_t OFF_AIM_CAMTRANS    = 0x78; // AimController -> camTransform
+static const uintptr_t OFF_AIM_HEADANGLES  = 0xB8; // AimController -> _headDirectiveAngles (Vector3, teqribi: baxis bucaqlari?)
 
 // ---------------- Ayarlar ----------------
 static bool  g_enabled       = true;
@@ -75,6 +77,7 @@ static std::vector<void*> g_players;
 typedef Vector3 (*Vec3Fn)(void*, void*);
 static Vec3Fn TrGetPos = nullptr;
 static Vec3Fn TrGetFwd = nullptr;
+static Vec3Fn TrGetEuler = nullptr;
 typedef void* (*GetInstFn)(void*);
 static GetInstFn CamGetInstance = nullptr;
 typedef void (*PglFn)(void*, Vector3, void*);
@@ -178,7 +181,17 @@ static void Tick(void *local) {
     time_t now = time(nullptr);
     if (now != last) {
         last = now;
-        if (best) LOGI("oyuncu=%zu en yaxin dusmen: mesafe=%.1f bucaq=%.1f", g_players.size(), bestDist, bestAng);
+        if (best) {
+            LOGI("oyuncu=%zu en yaxin dusmen: mesafe=%.1f bucaq=%.1f", g_players.size(), bestDist, bestAng);
+            // 2-ci addim testi: baxis bucaqlari hardadir? (yalniz oxuyuruq)
+            Vector3 hda = *(Vector3 *)((uintptr_t)aim + OFF_AIM_HEADANGLES);
+            Vector3 eu = TrGetEuler(camT, nullptr);
+            Vector3 dd{bestHead.x - cp.x, bestHead.y - cp.y, bestHead.z - cp.z};
+            float tyaw = std::atan2(dd.x, dd.z) * 57.29578f;
+            float tpitch = -std::asin(dd.y / bestDist) * 57.29578f;
+            LOGI("aci: headAngles=(%.1f,%.1f,%.1f) kameraEuler=(%.1f,%.1f,%.1f) hedefYaw=%.1f hedefPitch=%.1f",
+                 hda.x, hda.y, hda.z, eu.x, eu.y, eu.z, tyaw, tpitch);
+        }
         else      LOGI("oyuncu=%zu dusmen tapilmadi", g_players.size());
     }
 
@@ -213,6 +226,7 @@ static void *InitThread(void *) {
 
     TrGetPos = (Vec3Fn)(g_base + RVA_TR_GETPOS);
     TrGetFwd = (Vec3Fn)(g_base + RVA_TR_GETFWD);
+    TrGetEuler = (Vec3Fn)(g_base + RVA_TR_GETEULER);
     CamGetInstance = (GetInstFn)(g_base + RVA_CAM_GETINSTANCE);
     AimPgl = (PglFn)(g_base + RVA_AIM_PGL);
 
