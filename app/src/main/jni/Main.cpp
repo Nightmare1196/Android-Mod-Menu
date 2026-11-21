@@ -1,25 +1,30 @@
-// StandChillow 2.07 (offline) - 1-ci addim: yukleme + oxuma testi (nisan almir, yalniz log yazir)
-// Hedef: Android arm64-v8a, IL2CPP. Java/JNI hissesi YOXDUR (JNI_OnLoad yoxdur).
+// StandChillow 2.07 (offline) - v8: cheating.txt ile idare olunan sistem
+//  * Aimbot (kamera/baxis veziyyetine yazir) - ayarlari cheating.txt-den oxuyur
+//  * Admin panelinin hiyleleri (ESP, sonsuz sursat, hereket...) - oyunun oz CheatParameters obyektine yazir
+// Hedef: Android arm64-v8a, IL2CPP. Java/JNI hissesi YOXDUR.
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <ctime>
+#include <cstdarg>
 #include <unistd.h>
 #include <pthread.h>
+#include <sys/stat.h>
 #include <vector>
+#include <map>
+#include <string>
 #include <algorithm>
 #include <android/log.h>
 
-#include <cstdarg>
-#include <sys/stat.h>
-
+#define BUILD_ID "v8-cheating-txt"
 #define TAG "PHANTOM_AIMBOT"
 #define LOG_DIR  "/storage/emulated/0/Android/data/com.Nightmare.Custom1/files"
 #define LOG_FILE LOG_DIR "/mod_log.txt"
+#define CFG_FILE LOG_DIR "/cheating.txt"
 
-// Hem logcat-a, hem de faila yazir (logcat gorunmese fayla baxmaq ucun)
+// Hem logcat-a, hem de faila yazir
 static void LogBoth(const char *fmt, ...) {
     char buf[512];
     va_list ap;
@@ -28,14 +33,13 @@ static void LogBoth(const char *fmt, ...) {
     va_end(ap);
     __android_log_print(ANDROID_LOG_INFO, TAG, "%s", buf);
     static int lines = 0;
-    if (lines < 3000) {
+    if (lines < 5000) {
         mkdir(LOG_DIR, 0777);
         FILE *f = fopen(LOG_FILE, "a");
         if (f) { fprintf(f, "%s\n", buf); fclose(f); lines++; }
     }
 }
 #define LOGI(...) LogBoth(__VA_ARGS__)
-#define LOGE(...) LogBoth(__VA_ARGS__)
 
 extern "C" int DobbyHook(void *address, void *replace_call, void **origin_call);
 
@@ -50,9 +54,10 @@ static const uintptr_t RVA_TR_GETPOS       = 0x77D3690; // Transform.get_positio
 static const uintptr_t RVA_TR_GETFWD       = 0x77D3BE0; // Transform.get_forward
 static const uintptr_t RVA_TR_GETEULER     = 0x77D3880; // Transform.get_eulerAngles
 static const uintptr_t RVA_TR_SETEULER     = 0x77D3918; // Transform.set_eulerAngles
-static const uintptr_t RVA_OFFLINE_START   = 0x416AFD0; // OfflineModeController.mco
-static const uintptr_t RVA_OFFLINE_STOP    = 0x416B010; // OfflineModeController.mcp
-static const uintptr_t RVA_AIM_PGL         = 0x42EC7E4; // AimController.pgl(Vector3) - isleyisi yoxlanmayib
+// "cva" - hiyle (cheat) idareci sinfi
+static const uintptr_t RVA_CVA_CTOR        = 0x419A030; // cva..ctor(GameController, CheatParameters, bool, bool)
+static const uintptr_t RVA_CVA_BCFG        = 0x419A0A4; // cva.bcfg()
+static const uintptr_t RVA_CVA_LYL         = 0x419A1AC; // cva.lyl(CheatParameters)  - deyisikliyi bildirir
 
 // ---------------- Sahe ofsetleri (dump.cs) ----------------
 static const uintptr_t OFF_CAM_LOCALPLAYER = 0x40; // PlayerMainCamera -> PlayerController
@@ -61,35 +66,39 @@ static const uintptr_t OFF_PC_TEAM         = 0x79; // PlayerController -> Team (
 static const uintptr_t OFF_PC_AIM          = 0xD0; // PlayerController -> AimController
 static const uintptr_t OFF_BIPED_HEAD      = 0x20; // BipedMap -> Head (Transform)
 static const uintptr_t OFF_AIM_CAMTRANS    = 0x78; // AimController -> camTransform
-static const uintptr_t OFF_AIM_HEADANGLES  = 0xB8; // AimController -> _headDirectiveAngles (Vector3, teqribi: baxis bucaqlari?)
+static const uintptr_t OFF_AIM_DATA        = 0x80; // AimController -> AimingData
+static const uintptr_t OFF_AIM_MINX        = 0x94; // AimController -> minimumX (pitch hedd)
+static const uintptr_t OFF_AIM_MAXX        = 0x98; // AimController -> maximumX
+static const uintptr_t OFF_AD_CURAIM       = 0x18; // AimingData -> curAimAngle (pitch,yaw,0)
+static const uintptr_t OFF_AD_CUREUL       = 0x24; // AimingData -> curEulerAngles (0,yaw,0)
+// cva -> CheatParameters -> alt obyektler
+static const uintptr_t OFF_CVA_PARAMS      = 0x10; // cva -> CheatParameters (hazirki)
+static const uintptr_t OFF_CP_PLAYER       = 0x10;
+static const uintptr_t OFF_CP_AIMESP       = 0x18;
+static const uintptr_t OFF_CP_WEAPON       = 0x30;
+static const uintptr_t OFF_CP_OTHER        = 0x38;
 
-// ---------------- Ayarlar ----------------
-static bool  g_enabled       = true;
-static bool  g_teamCheck     = true;   // eyni komandani kecir
-static bool  g_requireOffline= false;  // DIAQNOSTIKA: offline bayragi tetiklenmirse de oxuma isleyir (2.07 yalniz offline-dir)
-static bool  g_applyAim      = true;   // nisan aciq: oyunun oz baxis veziyyetine (AimingData) yazir
-static float g_maxDist       = 200.0f;
-static float g_fov           = 60.0f;  // derece: yalniz bu konusun icindeki dusmenlere (nisangahdan ucaqliq)
-static float g_smooth        = 1.0f;   // 0..1, boyuk = tez ceikir
-
-#define BUILD_ID "v7-aim-write-heartbeat"
-static unsigned g_cntEnable = 0, g_cntLate = 0, g_cntTick = 0, g_cntApplied = 0;
+// ---------------- Ayarlar (cheating.txt-den yenilenir) ----------------
+static bool  g_enabled   = true;
+static bool  g_teamCheck = true;
+static bool  g_applyAim  = true;
+static float g_maxDist   = 200.0f;
+static float g_fov       = 60.0f;
+static float g_smooth    = 1.0f;
+static bool  g_notify    = true;
 
 // ---------------- Veziyyet (hamisi Unity esas thread-indedir) ----------------
+static unsigned g_cntLate = 0, g_cntTick = 0, g_cntApplied = 0;
 static uintptr_t g_base = 0;
-static bool g_offline = false;
-static std::vector<void*> g_players;
+static std::vector<void *> g_players;
+static void *g_cheats = nullptr; // cva obyekti
 
-typedef Vector3 (*Vec3Fn)(void*, void*);
-static Vec3Fn TrGetPos = nullptr;
-static Vec3Fn TrGetFwd = nullptr;
-static Vec3Fn TrGetEuler = nullptr;
+typedef Vector3 (*Vec3Fn)(void *, void *);
+static Vec3Fn TrGetPos = nullptr, TrGetFwd = nullptr, TrGetEuler = nullptr;
 typedef void (*SetVec3Fn)(void *, Vector3, void *);
 static SetVec3Fn TrSetEuler = nullptr;
-typedef void* (*GetInstFn)(void*);
+typedef void *(*GetInstFn)(void *);
 static GetInstFn CamGetInstance = nullptr;
-typedef void (*PglFn)(void*, Vector3, void*);
-static PglFn AimPgl = nullptr;
 
 static uintptr_t get_module_base(const char *name) {
     uintptr_t base = 0;
@@ -107,13 +116,10 @@ static inline bool PtrOk(void *p) {
     uintptr_t v = (uintptr_t)p;
     return v > 0x10000 && v < 0x0000800000000000ULL && (v & 7) == 0;
 }
-
-// Unity obyektinin native hissesi (m_CachedPtr, +0x10) bos deyilse obyekt sagdir
 static inline bool UnityAlive(void *obj) {
     if (!PtrOk(obj)) return false;
     return *(void **)((uintptr_t)obj + 0x10) != nullptr;
 }
-
 static void *GetLocalPlayer() {
     if (!CamGetInstance) return nullptr;
     void *cam = CamGetInstance(nullptr);
@@ -121,7 +127,6 @@ static void *GetLocalPlayer() {
     void *lp = *(void **)((uintptr_t)cam + OFF_CAM_LOCALPLAYER);
     return UnityAlive(lp) ? lp : nullptr;
 }
-
 static void *GetHead(void *player) {
     void *biped = *(void **)((uintptr_t)player + OFF_PC_BIPED);
     if (!PtrOk(biped)) return nullptr;
@@ -129,36 +134,217 @@ static void *GetHead(void *player) {
     return UnityAlive(head) ? head : nullptr;
 }
 
-// ---------------- Hook-lar ----------------
-static void (*old_OnEnable)(void *, void *);
-static void hk_OnEnable(void *self, void *mi) {
-    g_cntEnable++;
-    if (self && std::find(g_players.begin(), g_players.end(), self) == g_players.end()) {
-        g_players.push_back(self);
-        static int n = 0;
-        if (n++ < 20) LOGI("OnEnable #%d obyekt=%p oyuncular=%zu", n, self, g_players.size());
-    }
-    old_OnEnable(self, mi);
+// ================= cheating.txt =================
+static std::map<std::string, std::string> g_cfg;
+static time_t g_cfgMtime = 0;
+
+static const char *TEMPLATE =
+"# StandChillow mod ayarlari. 1 = aciq, 0 = qapali.\n"
+"# Setrin evvelinde # varsa, o ayar tetbiq olunmur (oyunun ozunun deyeri qalir).\n"
+"# Fayl deyisdikde 1-2 saniye icinde tetbiq olunur.\n"
+"\n"
+"# --- Aimbot ---\n"
+"aimbot=1\n"
+"aim_fov=60\n"
+"aim_smooth=1.0\n"
+"aim_maxdist=200\n"
+"team_check=1\n"
+"\n"
+"# --- ESP ---\n"
+"#esp=1\n"
+"#esp_boxes=1\n"
+"#esp_skeleton=1\n"
+"#esp_snapline=0\n"
+"\n"
+"# --- Silah ---\n"
+"#infinity_ammo=1\n"
+"#infinity_grenades=1\n"
+"#grenade_trajectory=1\n"
+"#anti_recoil=1\n"
+"#wall_shot=1\n"
+"\n"
+"# --- Oyuncu ---\n"
+"#move_speed=5.3\n"
+"#gravity=16\n"
+"#jump_height=6.2\n"
+"#bhop=1\n"
+"#invisibility=0\n"
+"#untouchable=0\n"
+"#third_person=0\n"
+"#max_hp=100\n"
+"\n"
+"# --- Diger ---\n"
+"#radar=1\n"
+"#reverse_map=0\n"
+"#time_scale=1.0\n"
+"\n"
+"# Texniki: 1 = deyisiklik oyuna bildirilir; oyun cokurse 0 yaz\n"
+"notify=1\n";
+
+static void EnsureTemplate() {
+    struct stat st;
+    if (stat(CFG_FILE, &st) == 0) return;
+    mkdir(LOG_DIR, 0777);
+    FILE *f = fopen(CFG_FILE, "w");
+    if (f) { fputs(TEMPLATE, f); fclose(f); LOGI("cheating.txt yaradildi"); }
 }
 
+static std::string Trim(const std::string &s) {
+    size_t a = s.find_first_not_of(" \t\r\n"), b = s.find_last_not_of(" \t\r\n");
+    return a == std::string::npos ? "" : s.substr(a, b - a + 1);
+}
+
+static bool CfgGet(const char *key, std::string &out) {
+    auto it = g_cfg.find(key);
+    if (it == g_cfg.end()) return false;
+    out = it->second;
+    return true;
+}
+static bool CfgBool(const char *key, bool &v) {
+    std::string s;
+    if (!CfgGet(key, s)) return false;
+    v = (s == "1" || s == "true" || s == "on" || s == "aciq");
+    return true;
+}
+static bool CfgFloat(const char *key, float &v) {
+    std::string s;
+    if (!CfgGet(key, s)) return false;
+    v = strtof(s.c_str(), nullptr);
+    return true;
+}
+
+static bool LoadConfig() { // dayisibse true
+    struct stat st;
+    if (stat(CFG_FILE, &st) != 0) { EnsureTemplate(); if (stat(CFG_FILE, &st) != 0) return false; }
+    if (st.st_mtime == g_cfgMtime) return false;
+    g_cfgMtime = st.st_mtime;
+    FILE *f = fopen(CFG_FILE, "r");
+    if (!f) return false;
+    g_cfg.clear();
+    char line[256];
+    while (fgets(line, sizeof(line), f)) {
+        std::string l = Trim(line);
+        if (l.empty() || l[0] == '#') continue;
+        size_t eq = l.find('=');
+        if (eq == std::string::npos) continue;
+        g_cfg[Trim(l.substr(0, eq))] = Trim(l.substr(eq + 1));
+    }
+    fclose(f);
+    LOGI("cheating.txt oxundu: %zu ayar", g_cfg.size());
+    return true;
+}
+
+static void ApplyAimConfig() {
+    bool b; float v;
+    if (CfgBool("aimbot", b)) g_applyAim = b;
+    if (CfgBool("team_check", b)) g_teamCheck = b;
+    if (CfgBool("notify", b)) g_notify = b;
+    if (CfgFloat("aim_fov", v)) g_fov = std::max(1.0f, std::min(360.0f, v));
+    if (CfgFloat("aim_smooth", v)) g_smooth = std::max(0.01f, std::min(1.0f, v));
+    if (CfgFloat("aim_maxdist", v)) g_maxDist = std::max(1.0f, v);
+}
+
+// ================= Hiyle (cheat) parametrlerinin yazilmasi =================
+typedef void (*LylFn)(void *, void *, void *);
+static LylFn old_CvaLyl = nullptr;
+
+static void ApplyCheats() {
+    if (!g_cheats) return;
+    void *cp = *(void **)((uintptr_t)g_cheats + OFF_CVA_PARAMS);
+    if (!PtrOk(cp)) return;
+    void *player = *(void **)((uintptr_t)cp + OFF_CP_PLAYER);
+    void *aimesp = *(void **)((uintptr_t)cp + OFF_CP_AIMESP);
+    void *weapon = *(void **)((uintptr_t)cp + OFF_CP_WEAPON);
+    void *other  = *(void **)((uintptr_t)cp + OFF_CP_OTHER);
+
+    bool changed = false;
+    auto setB = [&](void *obj, uintptr_t off, const char *key) {
+        bool v;
+        if (PtrOk(obj) && CfgBool(key, v)) {
+            uint8_t *p = (uint8_t *)((uintptr_t)obj + off);
+            if (*p != (uint8_t)v) { *p = (uint8_t)v; changed = true; }
+        }
+    };
+    auto setF = [&](void *obj, uintptr_t off, const char *key) {
+        float v;
+        if (PtrOk(obj) && CfgFloat(key, v)) {
+            float *p = (float *)((uintptr_t)obj + off);
+            if (*p != v) { *p = v; changed = true; }
+        }
+    };
+    auto setI = [&](void *obj, uintptr_t off, const char *key) {
+        float v;
+        if (PtrOk(obj) && CfgFloat(key, v)) {
+            int *p = (int *)((uintptr_t)obj + off);
+            if (*p != (int)v) { *p = (int)v; changed = true; }
+        }
+    };
+
+    // ESP (AimEspCheatParameters)
+    setB(aimesp, 0x10, "esp");
+    setB(aimesp, 0x18, "esp_boxes");
+    setB(aimesp, 0x19, "esp_skeleton");
+    setB(aimesp, 0x1A, "esp_snapline");
+    // Silah (WeaponCheatParameters)
+    setB(weapon, 0x10, "infinity_ammo");
+    setB(weapon, 0x11, "infinity_grenades");
+    setB(weapon, 0x12, "grenade_trajectory");
+    setB(weapon, 0x13, "anti_recoil");
+    setB(weapon, 0x14, "wall_shot");
+    // Oyuncu (PlayerCheatParameters)
+    setF(player, 0x10, "move_speed");
+    setF(player, 0x14, "gravity");
+    setF(player, 0x18, "jump_height");
+    setB(player, 0x20, "bhop");
+    setB(player, 0x21, "invisibility");
+    setB(player, 0x22, "untouchable");
+    setI(player, 0x24, "max_hp");
+    setB(player, 0x28, "third_person");
+    // Diger (OtherCheatParameters)
+    setF(other, 0x10, "time_scale");
+    setB(other, 0x14, "reverse_map");
+    setB(other, 0x15, "radar");
+
+    if (changed) {
+        LOGI("hiyle parametrleri yazildi (notify=%d)", (int)g_notify);
+        if (g_notify && old_CvaLyl) old_CvaLyl(g_cheats, cp, nullptr);
+    }
+}
+
+// ---------------- Hook-lar ----------------
+static void OnCva(void *self) {
+    if (self && self != g_cheats) {
+        g_cheats = self;
+        void *cp = *(void **)((uintptr_t)self + OFF_CVA_PARAMS);
+        LOGI("cva yakalandi: self=%p params=%p", self, cp);
+    }
+}
+
+static void (*old_CvaCtor)(void *, void *, void *, uint8_t, uint8_t, void *);
+static void hk_CvaCtor(void *self, void *a, void *b, uint8_t c, uint8_t d, void *mi) {
+    old_CvaCtor(self, a, b, c, d, mi);
+    OnCva(self);
+}
+static void (*old_CvaBcfg)(void *, void *);
+static void hk_CvaBcfg(void *self, void *mi) {
+    OnCva(self);
+    old_CvaBcfg(self, mi);
+}
+static void hk_CvaLyl(void *self, void *a, void *mi) {
+    OnCva(self);
+    old_CvaLyl(self, a, mi);
+}
+
+static void (*old_OnEnable)(void *, void *);
+static void hk_OnEnable(void *self, void *mi) {
+    if (self && std::find(g_players.begin(), g_players.end(), self) == g_players.end())
+        g_players.push_back(self);
+    old_OnEnable(self, mi);
+}
 static void (*old_OnDisable)(void *, void *);
 static void hk_OnDisable(void *self, void *mi) {
     g_players.erase(std::remove(g_players.begin(), g_players.end(), self), g_players.end());
     old_OnDisable(self, mi);
-}
-
-static void (*old_OffStart)(void *, void *);
-static void hk_OffStart(void *self, void *mi) {
-    g_offline = true;
-    LOGI("Offline rejim BASLADI");
-    old_OffStart(self, mi);
-}
-
-static void (*old_OffStop)(void *, void *);
-static void hk_OffStop(void *self, void *mi) {
-    g_offline = false;
-    LOGI("Offline rejim BITDI");
-    old_OffStop(self, mi);
 }
 
 static float NormDeg(float a) { while (a > 180.0f) a -= 360.0f; while (a < -180.0f) a += 360.0f; return a; }
@@ -169,30 +355,6 @@ static void Tick(void *local) {
     if (!PtrOk(aim)) return;
     void *camT = *(void **)((uintptr_t)aim + OFF_AIM_CAMTRANS);
     if (!UnityAlive(camT)) return;
-
-    // ---- DIAQNOSTIKA: baxis bucaqlari hansi sahede saxlanir? (yalniz oxuyuruq, ~4 defe/san) ----
-    {
-        static long lastMs = 0;
-        timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts);
-        long ms = ts.tv_sec * 1000L + ts.tv_nsec / 1000000L;
-        if (ms - lastMs >= 250) {
-            lastMs = ms;
-            Vector3 ec = TrGetEuler(camT, nullptr);
-            void *ad = *(void **)((uintptr_t)aim + 0x80);              // AimingData
-            Vector3 caa{0, 0, 0}, ce{0, 0, 0};
-            if (PtrOk(ad)) { caa = *(Vector3 *)((uintptr_t)ad + 0x18); ce = *(Vector3 *)((uintptr_t)ad + 0x24); }
-            void *sn = *(void **)((uintptr_t)aim + 0x170);             // AimSnapshot
-            float ax = 0, ay = 0;
-            if (PtrOk(sn)) { ax = *(float *)((uintptr_t)sn + 0x54); ay = *(float *)((uintptr_t)sn + 0x58); }
-            void *spine = *(void **)((uintptr_t)aim + 0x60);           // spineDirector
-            void *fpsc  = *(void **)((uintptr_t)aim + 0x68);           // FPSCamera
-            Vector3 es{0, 0, 0}, ef{0, 0, 0};
-            if (UnityAlive(spine)) es = TrGetEuler(spine, nullptr);
-            if (UnityAlive(fpsc))  ef = TrGetEuler(fpsc, nullptr);
-            LOGI("A cam=(%.1f,%.1f) curAim=(%.1f,%.1f,%.1f) curEul=(%.1f,%.1f,%.1f) snapXY=(%.1f,%.1f) spine=(%.1f,%.1f) fps=(%.1f,%.1f)",
-                 ec.x, ec.y, caa.x, caa.y, caa.z, ce.x, ce.y, ce.z, ax, ay, es.x, es.y, ef.x, ef.y);
-        }
-    }
 
     Vector3 cp = TrGetPos(camT, nullptr);
     Vector3 fw = TrGetFwd(camT, nullptr);
@@ -226,18 +388,15 @@ static void Tick(void *local) {
         float ny = curYaw + NormDeg(tyaw - curYaw) * g_smooth;
         float np = curPitch + (tpitch - curPitch) * g_smooth;
         ny = std::fmod(ny + 360.0f, 360.0f);
-        // Pitch hududu (oyunun oz minimumX/maximumX deyerleri, munasibdirse)
-        float minX = *(float *)((uintptr_t)aim + 0x94), maxX = *(float *)((uintptr_t)aim + 0x98);
+        float minX = *(float *)((uintptr_t)aim + OFF_AIM_MINX), maxX = *(float *)((uintptr_t)aim + OFF_AIM_MAXX);
         if (minX < maxX && minX > -91.0f && maxX < 91.0f) np = std::max(minX, std::min(maxX, np));
-        // Oyunun ozunun baxis veziyyetini yaziriq: curAimAngle=(pitch,yaw,0), curEulerAngles=(0,yaw,0) (beden)
-        void *ad = *(void **)((uintptr_t)aim + 0x80);
+        void *ad = *(void **)((uintptr_t)aim + OFF_AIM_DATA);
         if (PtrOk(ad)) {
-            Vector3 *caa = (Vector3 *)((uintptr_t)ad + 0x18);
-            Vector3 *ce  = (Vector3 *)((uintptr_t)ad + 0x24);
+            Vector3 *caa = (Vector3 *)((uintptr_t)ad + OFF_AD_CURAIM);
+            Vector3 *ce  = (Vector3 *)((uintptr_t)ad + OFF_AD_CUREUL);
             caa->x = np; caa->y = ny;
             ce->y = ny;
         }
-        // Bu kadrin gorunusu da uygun olsun
         TrSetEuler(camT, Vector3{np, ny, 0.0f}, nullptr);
         applied = true;
         g_cntApplied++;
@@ -245,7 +404,7 @@ static void Tick(void *local) {
 
     static time_t last = 0;
     time_t now = time(nullptr);
-    if (now != last) {
+    if (now - last >= 5) {
         last = now;
         if (best) LOGI("oyuncu=%zu hedef: mesafe=%.1f bucaq=%.1f aim=%d", g_players.size(), bestDist, bestAng, (int)applied);
         else      LOGI("oyuncu=%zu dusmen tapilmadi", g_players.size());
@@ -257,14 +416,18 @@ static void hk_LateUpdate(void *self, void *mi) {
     g_cntLate++;
     old_LateUpdate(self, mi);
     if (!g_enabled) return;
-    void *local = GetLocalPlayer();
-    static time_t lastDiag = 0;
+
+    // Her saniye: cheating.txt-ni yoxla ve hiyleleri tetbiq et
+    static time_t lastCfg = 0;
     time_t now = time(nullptr);
-    if (now != lastDiag && (!local || self == local)) {
-        lastDiag = now;
-        LOGI("diag: offline=%d oyuncular=%zu local=%p", (int)g_offline, g_players.size(), local);
+    if (now != lastCfg) {
+        lastCfg = now;
+        LoadConfig();
+        ApplyAimConfig();
+        ApplyCheats();
     }
-    if (g_requireOffline && !g_offline) return;
+
+    void *local = GetLocalPlayer();
     if (local && self == local) Tick(local);
 }
 
@@ -275,6 +438,7 @@ static void Hook(const char *name, uintptr_t rva, void *rep, void **orig) {
 }
 
 static void *InitThread(void *) {
+    EnsureTemplate();
     while (!(g_base = get_module_base("libil2cpp.so"))) usleep(100000);
     LOGI("libil2cpp baza: %p", (void *)g_base);
     sleep(8); // oyunun yuklenmesini gozle (tez hook cokme verir)
@@ -284,19 +448,19 @@ static void *InitThread(void *) {
     TrGetEuler = (Vec3Fn)(g_base + RVA_TR_GETEULER);
     TrSetEuler = (SetVec3Fn)(g_base + RVA_TR_SETEULER);
     CamGetInstance = (GetInstFn)(g_base + RVA_CAM_GETINSTANCE);
-    AimPgl = (PglFn)(g_base + RVA_AIM_PGL);
 
     Hook("OnEnable",   RVA_PC_ONENABLE,   (void *)hk_OnEnable,   (void **)&old_OnEnable);
     Hook("OnDisable",  RVA_PC_ONDISABLE,  (void *)hk_OnDisable,  (void **)&old_OnDisable);
     Hook("LateUpdate", RVA_PC_LATEUPDATE, (void *)hk_LateUpdate, (void **)&old_LateUpdate);
-    Hook("OffStart",   RVA_OFFLINE_START, (void *)hk_OffStart,   (void **)&old_OffStart);
-    Hook("OffStop",    RVA_OFFLINE_STOP,  (void *)hk_OffStop,    (void **)&old_OffStop);
+    Hook("CvaCtor",    RVA_CVA_CTOR,      (void *)hk_CvaCtor,    (void **)&old_CvaCtor);
+    Hook("CvaBcfg",    RVA_CVA_BCFG,      (void *)hk_CvaBcfg,    (void **)&old_CvaBcfg);
+    Hook("CvaLyl",     RVA_CVA_LYL,       (void *)hk_CvaLyl,     (void **)&old_CvaLyl);
     LOGI("hazirdir");
-    // Ureyin vurusu: her 5 san hook-larin cagirilib-cagirilmadigini yazir (maksimum ~10 deqiqe)
-    for (int i = 0; i < 120; i++) {
-        sleep(5);
-        LOGI("heartbeat: enable=%u late=%u tick=%u aim=%u oyuncular=%zu",
-             g_cntEnable, g_cntLate, g_cntTick, g_cntApplied, g_players.size());
+
+    // Ureyin vurusu: her 10 san (maksimum ~10 deqiqe)
+    for (int i = 0; i < 60; i++) {
+        sleep(10);
+        LOGI("heartbeat: late=%u tick=%u aim=%u oyuncular=%zu cva=%p", g_cntLate, g_cntTick, g_cntApplied, g_players.size(), g_cheats);
     }
     return nullptr;
 }
