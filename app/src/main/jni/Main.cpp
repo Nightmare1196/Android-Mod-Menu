@@ -18,7 +18,7 @@
 #include <algorithm>
 #include <android/log.h>
 
-#define BUILD_ID "v10-cva-diag"
+#define BUILD_ID "v11-clone-apply"
 #define TAG "PHANTOM_AIMBOT"
 #define LOG_DIR  "/storage/emulated/0/Android/data/com.Nightmare.Custom1/files"
 #define LOG_FILE LOG_DIR "/mod_log.txt"
@@ -58,6 +58,7 @@ static const uintptr_t RVA_TR_SETEULER     = 0x77D3918; // Transform.set_eulerAn
 static const uintptr_t RVA_GC_GETINSTANCE  = 0x40D26A4; // GameController.ysv() static -> singleton
 static const uintptr_t RVA_GC_GETCVA       = 0x40D279C; // GameController.ytb() -> cva (instance)
 static const uintptr_t RVA_CVA_LYL         = 0x419A1AC; // cva.lyl(CheatParameters) - deyisikliyi bildirir
+static const uintptr_t RVA_CP_CLONE        = 0x4197188; // CheatParameters.Clone()
 
 // ---------------- Sahe ofsetleri (dump.cs) ----------------
 static const uintptr_t OFF_CAM_LOCALPLAYER = 0x40; // PlayerMainCamera -> PlayerController
@@ -250,6 +251,8 @@ typedef void (*LylFn)(void *, void *, void *);
 static LylFn CvaLyl = nullptr;
 typedef void *(*GetGCFn)(void *);
 static GetGCFn GetGC = nullptr;
+typedef void *(*CloneFn)(void *, void *);
+static CloneFn CpClone = nullptr;
 typedef void *(*GcGetCvaFn)(void *, void *);
 static GcGetCvaFn GcYtb = nullptr;
 
@@ -275,11 +278,8 @@ static void FindCva() {
     }
 }
 
-static void ApplyCheats() {
-    FindCva();
-    if (!g_cheats) return;
-    void *cp = *(void **)((uintptr_t)g_cheats + OFF_CVA_PARAMS);
-    if (!PtrOk(cp)) return;
+// Istenilen deyerleri yazir (dry=true: yalniz fergi yoxlayir, yazmir). Fergli bir sey varsa true qaytarir.
+static bool WriteCheats(void *cp, bool dry) {
     void *player = *(void **)((uintptr_t)cp + OFF_CP_PLAYER);
     void *aimesp = *(void **)((uintptr_t)cp + OFF_CP_AIMESP);
     void *weapon = *(void **)((uintptr_t)cp + OFF_CP_WEAPON);
@@ -290,21 +290,21 @@ static void ApplyCheats() {
         bool v;
         if (PtrOk(obj) && CfgBool(key, v)) {
             uint8_t *p = (uint8_t *)((uintptr_t)obj + off);
-            if (*p != (uint8_t)v) { *p = (uint8_t)v; changed = true; }
+            if (*p != (uint8_t)v) { if (!dry) *p = (uint8_t)v; changed = true; }
         }
     };
     auto setF = [&](void *obj, uintptr_t off, const char *key) {
         float v;
         if (PtrOk(obj) && CfgFloat(key, v)) {
             float *p = (float *)((uintptr_t)obj + off);
-            if (*p != v) { *p = v; changed = true; }
+            if (*p != v) { if (!dry) *p = v; changed = true; }
         }
     };
     auto setI = [&](void *obj, uintptr_t off, const char *key) {
         float v;
         if (PtrOk(obj) && CfgFloat(key, v)) {
             int *p = (int *)((uintptr_t)obj + off);
-            if (*p != (int)v) { *p = (int)v; changed = true; }
+            if (*p != (int)v) { if (!dry) *p = (int)v; changed = true; }
         }
     };
 
@@ -332,9 +332,41 @@ static void ApplyCheats() {
     setF(other, 0x10, "time_scale");
     setB(other, 0x14, "reverse_map");
     setB(other, 0x15, "radar");
+    return changed;
+}
 
-    if (changed) {
-        LOGI("hiyle parametrleri yazildi (notify=%d)", (int)g_notify);
+static void LogCvaFields() {
+    if (!g_cheats) return;
+    uintptr_t c = (uintptr_t)g_cheats;
+    static void *l18 = (void *)1, *l20 = (void *)1, *l28 = (void *)1, *l48 = (void *)1, *l10 = (void *)1;
+    static int lf = -1;
+    void *p10 = *(void **)(c + 0x10), *p18 = *(void **)(c + 0x18), *p20 = *(void **)(c + 0x20),
+         *p28 = *(void **)(c + 0x28), *p48 = *(void **)(c + 0x48);
+    int fl = (*(uint8_t *)(c + 0x40) << 8) | *(uint8_t *)(c + 0x41);
+    if (p10 != l10 || p18 != l18 || p20 != l20 || p28 != l28 || p48 != l48 || fl != lf) {
+        l10 = p10; l18 = p18; l20 = p20; l28 = p28; l48 = p48; lf = fl;
+        LOGI("cva alanlari: params=%p panel=%p material=%p event=%p applier=%p flags=%04x", p10, p18, p20, p28, p48, fl);
+    }
+}
+
+static void ApplyCheats() {
+    FindCva();
+    if (!g_cheats) return;
+    LogCvaFields();
+    void *cp = *(void **)((uintptr_t)g_cheats + OFF_CVA_PARAMS);
+    if (!PtrOk(cp)) return;
+
+    if (!WriteCheats(cp, true)) return; // fergli bir sey yoxdur
+
+    // Admin paneli "Tetbiq et" basanda etdiyi kimi: parametrlerin KOPYASINI yarat, deyis, lyl() ile bildir
+    void *ncp = (g_notify && CpClone) ? CpClone(cp, nullptr) : nullptr;
+    if (PtrOk(ncp)) {
+        WriteCheats(ncp, false);
+        LOGI("hiyle: kopya yaradildi %p (kohne %p), lyl cagirilir", ncp, cp);
+        if (CvaLyl) CvaLyl(g_cheats, ncp, nullptr);
+    } else {
+        WriteCheats(cp, false);
+        LOGI("hiyle parametrleri birbasa yazildi (notify=%d)", (int)g_notify);
         if (g_notify && CvaLyl) CvaLyl(g_cheats, cp, nullptr);
     }
 }
@@ -456,6 +488,7 @@ static void *InitThread(void *) {
     GetGC = (GetGCFn)(g_base + RVA_GC_GETINSTANCE);
     GcYtb = (GcGetCvaFn)(g_base + RVA_GC_GETCVA);
     CvaLyl = (LylFn)(g_base + RVA_CVA_LYL);
+    CpClone = (CloneFn)(g_base + RVA_CP_CLONE);
 
     Hook("OnEnable",   RVA_PC_ONENABLE,   (void *)hk_OnEnable,   (void **)&old_OnEnable);
     Hook("OnDisable",  RVA_PC_ONDISABLE,  (void *)hk_OnDisable,  (void **)&old_OnDisable);
