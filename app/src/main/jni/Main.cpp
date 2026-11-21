@@ -18,7 +18,7 @@
 #include <algorithm>
 #include <android/log.h>
 
-#define BUILD_ID "v8-cheating-txt"
+#define BUILD_ID "v9-gc-singleton"
 #define TAG "PHANTOM_AIMBOT"
 #define LOG_DIR  "/storage/emulated/0/Android/data/com.Nightmare.Custom1/files"
 #define LOG_FILE LOG_DIR "/mod_log.txt"
@@ -54,10 +54,9 @@ static const uintptr_t RVA_TR_GETPOS       = 0x77D3690; // Transform.get_positio
 static const uintptr_t RVA_TR_GETFWD       = 0x77D3BE0; // Transform.get_forward
 static const uintptr_t RVA_TR_GETEULER     = 0x77D3880; // Transform.get_eulerAngles
 static const uintptr_t RVA_TR_SETEULER     = 0x77D3918; // Transform.set_eulerAngles
-// "cva" - hiyle (cheat) idareci sinfi
-static const uintptr_t RVA_CVA_CTOR        = 0x419A030; // cva..ctor(GameController, CheatParameters, bool, bool)
-static const uintptr_t RVA_CVA_BCFG        = 0x419A0A4; // cva.bcfg()
-static const uintptr_t RVA_CVA_LYL         = 0x419A1AC; // cva.lyl(CheatParameters)  - deyisikliyi bildirir
+// GameController (singleton) ve "cva" (hiyle idareci sinfi)
+static const uintptr_t RVA_GC_GETINSTANCE  = 0x40D26A4; // GameController.ysv() static -> singleton
+static const uintptr_t RVA_CVA_LYL         = 0x419A1AC; // cva.lyl(CheatParameters) - deyisikliyi bildirir
 
 // ---------------- Sahe ofsetleri (dump.cs) ----------------
 static const uintptr_t OFF_CAM_LOCALPLAYER = 0x40; // PlayerMainCamera -> PlayerController
@@ -71,6 +70,7 @@ static const uintptr_t OFF_AIM_MINX        = 0x94; // AimController -> minimumX 
 static const uintptr_t OFF_AIM_MAXX        = 0x98; // AimController -> maximumX
 static const uintptr_t OFF_AD_CURAIM       = 0x18; // AimingData -> curAimAngle (pitch,yaw,0)
 static const uintptr_t OFF_AD_CUREUL       = 0x24; // AimingData -> curEulerAngles (0,yaw,0)
+static const uintptr_t OFF_GC_CVA          = 0x30; // GameController -> cva
 // cva -> CheatParameters -> alt obyektler
 static const uintptr_t OFF_CVA_PARAMS      = 0x10; // cva -> CheatParameters (hazirki)
 static const uintptr_t OFF_CP_PLAYER       = 0x10;
@@ -246,9 +246,26 @@ static void ApplyAimConfig() {
 
 // ================= Hiyle (cheat) parametrlerinin yazilmasi =================
 typedef void (*LylFn)(void *, void *, void *);
-static LylFn old_CvaLyl = nullptr;
+static LylFn CvaLyl = nullptr;
+typedef void *(*GetGCFn)(void *);
+static GetGCFn GetGC = nullptr;
+
+static void FindCva() {
+    if (!GetGC) return;
+    void *gc = GetGC(nullptr);
+    if (!PtrOk(gc)) { g_cheats = nullptr; return; }
+    void *cv = *(void **)((uintptr_t)gc + OFF_GC_CVA);
+    if (!PtrOk(cv)) { g_cheats = nullptr; return; }
+    if (cv != g_cheats) {
+        g_cheats = cv;
+        void *cpp = *(void **)((uintptr_t)cv + OFF_CVA_PARAMS);
+        LOGI("cva tapildi: gc=%p cva=%p params=%p flags=%d,%d", gc, cv, cpp,
+             (int)*(uint8_t *)((uintptr_t)cv + 0x40), (int)*(uint8_t *)((uintptr_t)cv + 0x41));
+    }
+}
 
 static void ApplyCheats() {
+    FindCva();
     if (!g_cheats) return;
     void *cp = *(void **)((uintptr_t)g_cheats + OFF_CVA_PARAMS);
     if (!PtrOk(cp)) return;
@@ -307,34 +324,11 @@ static void ApplyCheats() {
 
     if (changed) {
         LOGI("hiyle parametrleri yazildi (notify=%d)", (int)g_notify);
-        if (g_notify && old_CvaLyl) old_CvaLyl(g_cheats, cp, nullptr);
+        if (g_notify && CvaLyl) CvaLyl(g_cheats, cp, nullptr);
     }
 }
 
 // ---------------- Hook-lar ----------------
-static void OnCva(void *self) {
-    if (self && self != g_cheats) {
-        g_cheats = self;
-        void *cp = *(void **)((uintptr_t)self + OFF_CVA_PARAMS);
-        LOGI("cva yakalandi: self=%p params=%p", self, cp);
-    }
-}
-
-static void (*old_CvaCtor)(void *, void *, void *, uint8_t, uint8_t, void *);
-static void hk_CvaCtor(void *self, void *a, void *b, uint8_t c, uint8_t d, void *mi) {
-    old_CvaCtor(self, a, b, c, d, mi);
-    OnCva(self);
-}
-static void (*old_CvaBcfg)(void *, void *);
-static void hk_CvaBcfg(void *self, void *mi) {
-    OnCva(self);
-    old_CvaBcfg(self, mi);
-}
-static void hk_CvaLyl(void *self, void *a, void *mi) {
-    OnCva(self);
-    old_CvaLyl(self, a, mi);
-}
-
 static void (*old_OnEnable)(void *, void *);
 static void hk_OnEnable(void *self, void *mi) {
     if (self && std::find(g_players.begin(), g_players.end(), self) == g_players.end())
@@ -448,13 +442,12 @@ static void *InitThread(void *) {
     TrGetEuler = (Vec3Fn)(g_base + RVA_TR_GETEULER);
     TrSetEuler = (SetVec3Fn)(g_base + RVA_TR_SETEULER);
     CamGetInstance = (GetInstFn)(g_base + RVA_CAM_GETINSTANCE);
+    GetGC = (GetGCFn)(g_base + RVA_GC_GETINSTANCE);
+    CvaLyl = (LylFn)(g_base + RVA_CVA_LYL);
 
     Hook("OnEnable",   RVA_PC_ONENABLE,   (void *)hk_OnEnable,   (void **)&old_OnEnable);
     Hook("OnDisable",  RVA_PC_ONDISABLE,  (void *)hk_OnDisable,  (void **)&old_OnDisable);
     Hook("LateUpdate", RVA_PC_LATEUPDATE, (void *)hk_LateUpdate, (void **)&old_LateUpdate);
-    Hook("CvaCtor",    RVA_CVA_CTOR,      (void *)hk_CvaCtor,    (void **)&old_CvaCtor);
-    Hook("CvaBcfg",    RVA_CVA_BCFG,      (void *)hk_CvaBcfg,    (void **)&old_CvaBcfg);
-    Hook("CvaLyl",     RVA_CVA_LYL,       (void *)hk_CvaLyl,     (void **)&old_CvaLyl);
     LOGI("hazirdir");
 
     // Ureyin vurusu: her 10 san (maksimum ~10 deqiqe)
