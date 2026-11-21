@@ -18,7 +18,7 @@
 #include <algorithm>
 #include <android/log.h>
 
-#define BUILD_ID "v9-gc-singleton"
+#define BUILD_ID "v10-cva-diag"
 #define TAG "PHANTOM_AIMBOT"
 #define LOG_DIR  "/storage/emulated/0/Android/data/com.Nightmare.Custom1/files"
 #define LOG_FILE LOG_DIR "/mod_log.txt"
@@ -56,6 +56,7 @@ static const uintptr_t RVA_TR_GETEULER     = 0x77D3880; // Transform.get_eulerAn
 static const uintptr_t RVA_TR_SETEULER     = 0x77D3918; // Transform.set_eulerAngles
 // GameController (singleton) ve "cva" (hiyle idareci sinfi)
 static const uintptr_t RVA_GC_GETINSTANCE  = 0x40D26A4; // GameController.ysv() static -> singleton
+static const uintptr_t RVA_GC_GETCVA       = 0x40D279C; // GameController.ytb() -> cva (instance)
 static const uintptr_t RVA_CVA_LYL         = 0x419A1AC; // cva.lyl(CheatParameters) - deyisikliyi bildirir
 
 // ---------------- Sahe ofsetleri (dump.cs) ----------------
@@ -249,12 +250,22 @@ typedef void (*LylFn)(void *, void *, void *);
 static LylFn CvaLyl = nullptr;
 typedef void *(*GetGCFn)(void *);
 static GetGCFn GetGC = nullptr;
+typedef void *(*GcGetCvaFn)(void *, void *);
+static GcGetCvaFn GcYtb = nullptr;
 
 static void FindCva() {
     if (!GetGC) return;
     void *gc = GetGC(nullptr);
-    if (!PtrOk(gc)) { g_cheats = nullptr; return; }
-    void *cv = *(void **)((uintptr_t)gc + OFF_GC_CVA);
+    void *raw = PtrOk(gc) ? *(void **)((uintptr_t)gc + OFF_GC_CVA) : nullptr;
+    void *viaCall = (PtrOk(gc) && GcYtb) ? GcYtb(gc, nullptr) : nullptr;
+    void *def = PtrOk(gc) ? *(void **)((uintptr_t)gc + 0x1B0) : nullptr; // _defaultCheatParameters
+    static time_t lastDbg = 0;
+    time_t now = time(nullptr);
+    if (!g_cheats && now - lastDbg >= 5) {
+        lastDbg = now;
+        LOGI("FindCva: gc=%p raw=%p ytb=%p default=%p", gc, raw, viaCall, def);
+    }
+    void *cv = PtrOk(raw) ? raw : viaCall;
     if (!PtrOk(cv)) { g_cheats = nullptr; return; }
     if (cv != g_cheats) {
         g_cheats = cv;
@@ -443,6 +454,7 @@ static void *InitThread(void *) {
     TrSetEuler = (SetVec3Fn)(g_base + RVA_TR_SETEULER);
     CamGetInstance = (GetInstFn)(g_base + RVA_CAM_GETINSTANCE);
     GetGC = (GetGCFn)(g_base + RVA_GC_GETINSTANCE);
+    GcYtb = (GcGetCvaFn)(g_base + RVA_GC_GETCVA);
     CvaLyl = (LylFn)(g_base + RVA_CVA_LYL);
 
     Hook("OnEnable",   RVA_PC_ONENABLE,   (void *)hk_OnEnable,   (void **)&old_OnEnable);
