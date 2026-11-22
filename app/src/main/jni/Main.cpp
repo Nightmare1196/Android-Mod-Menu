@@ -18,7 +18,7 @@
 #include <algorithm>
 #include <android/log.h>
 
-#define BUILD_ID "v11-clone-apply"
+#define BUILD_ID "v12-hook-retry"
 #define TAG "PHANTOM_AIMBOT"
 #define LOG_DIR  "/storage/emulated/0/Android/data/com.Nightmare.Custom1/files"
 #define LOG_FILE LOG_DIR "/mod_log.txt"
@@ -469,10 +469,23 @@ static void hk_LateUpdate(void *self, void *mi) {
 }
 
 // ---------------- Baslatma ----------------
-static void Hook(const char *name, uintptr_t rva, void *rep, void **orig) {
-    int r = DobbyHook((void *)(g_base + rva), rep, orig);
-    LOGI("hook %s @%p -> %d", name, (void *)(g_base + rva), r);
+static void LogMapsFor(uintptr_t addr) {
+    FILE *fp = fopen("/proc/self/maps", "r");
+    if (!fp) return;
+    char line[512];
+    while (fgets(line, sizeof(line), fp)) {
+        unsigned long lo = 0, hi = 0;
+        if (sscanf(line, "%lx-%lx", &lo, &hi) == 2 && addr >= lo && addr < hi) {
+            size_t n = strlen(line);
+            if (n && line[n - 1] == '\n') line[n - 1] = 0;
+            LOGI("maps: %s", line);
+            break;
+        }
+    }
+    fclose(fp);
 }
+
+struct HookDef { const char *name; uintptr_t rva; void *rep; void **orig; bool ok; };
 
 static void *InitThread(void *) {
     EnsureTemplate();
@@ -490,22 +503,11 @@ static void *InitThread(void *) {
     CvaLyl = (LylFn)(g_base + RVA_CVA_LYL);
     CpClone = (CloneFn)(g_base + RVA_CP_CLONE);
 
-    Hook("OnEnable",   RVA_PC_ONENABLE,   (void *)hk_OnEnable,   (void **)&old_OnEnable);
-    Hook("OnDisable",  RVA_PC_ONDISABLE,  (void *)hk_OnDisable,  (void **)&old_OnDisable);
-    Hook("LateUpdate", RVA_PC_LATEUPDATE, (void *)hk_LateUpdate, (void **)&old_LateUpdate);
-    LOGI("hazirdir");
-
-    // Ureyin vurusu: her 10 san (maksimum ~10 deqiqe)
-    for (int i = 0; i < 60; i++) {
-        sleep(10);
-        LOGI("heartbeat: late=%u tick=%u aim=%u oyuncular=%zu cva=%p", g_cntLate, g_cntTick, g_cntApplied, g_players.size(), g_cheats);
-    }
-    return nullptr;
-}
-
-__attribute__((constructor))
-static void ModInit() {
-    LOGI("MyLibName YUKLENDI (constructor) build=%s", BUILD_ID);
-    pthread_t t;
-    if (pthread_create(&t, nullptr, InitThread, nullptr) == 0) pthread_detach(t);
-}
+    // Hook-lar: ugursuz olsa 3 san ara ile 20 defeye qeder yeniden cehd edir
+    HookDef hooks[] = {
+        {"OnEnable",   RVA_PC_ONENABLE,   (void *)hk_OnEnable,   (void **)&old_OnEnable,   false},
+        {"OnDisable",  RVA_PC_ONDISABLE,  (void *)hk_OnDisable,  (void **)&old_OnDisable,  false},
+        {"LateUpdate", RVA_PC_LATEUPDATE, (void *)hk_LateUpdate, (void **)&old_LateUpdate, false},
+    };
+    for (int attempt = 1; attempt <= 20; attempt++) {
+ 
