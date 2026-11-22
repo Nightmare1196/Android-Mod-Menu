@@ -510,4 +510,30 @@ static void *InitThread(void *) {
         {"LateUpdate", RVA_PC_LATEUPDATE, (void *)hk_LateUpdate, (void **)&old_LateUpdate, false},
     };
     for (int attempt = 1; attempt <= 20; attempt++) {
- 
+        bool all = true;
+        for (auto &h : hooks) {
+            if (h.ok) continue;
+            int r = DobbyHook((void *)(g_base + h.rva), h.rep, h.orig);
+            LOGI("hook %s @%p -> %d (cehd %d)", h.name, (void *)(g_base + h.rva), r, attempt);
+            h.ok = (r == 0);
+            if (!h.ok) { all = false; LogMapsFor(g_base + h.rva); }
+        }
+        if (all) break;
+        sleep(3);
+    }
+    LOGI("hazirdir");
+
+    // Ureyin vurusu: her 10 san (maksimum ~10 deqiqe)
+    for (int i = 0; i < 60; i++) {
+        sleep(10);
+        LOGI("heartbeat: late=%u tick=%u aim=%u oyuncular=%zu cva=%p", g_cntLate, g_cntTick, g_cntApplied, g_players.size(), g_cheats);
+    }
+    return nullptr;
+}
+
+__attribute__((constructor))
+static void ModInit() {
+    LOGI("MyLibName YUKLENDI (constructor) build=%s", BUILD_ID);
+    pthread_t t;
+    if (pthread_create(&t, nullptr, InitThread, nullptr) == 0) pthread_detach(t);
+}
